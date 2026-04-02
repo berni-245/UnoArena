@@ -25,12 +25,12 @@
 - **Real-Time Updates & Spectator Privacy:** Player actions and game-state updates must be propagated in near real time to players and observers at very large scale. Observers can watch rooms, but they must only see public information (player names and discard stack), never private hands. The system must preserve responsiveness under heavy connection load without compromising gameplay consistency.
 - **Strict Concurrency & Reactive Rules Enforcement:** The room-state service must serialize concurrent REST requests with strict sequence numbers. Stale actions are rejected with HTTP 409 Conflict, and clients reconcile via SSE.
 - **Disconnection Handling & Session Continuity:** The platform must handle temporary and permanent disconnections according to the following domain rules:
-- A disconnected player has a **60-second reconnection window** before being considered inactive.
-- During the reconnection window, the disconnected player's turn is skipped (as if they passed), and no bot substitution occurs.
-- If the window expires during the player's turn, an automatic forfeit is issued.
-- Forfeit in a casual room ends the player's participation; the game continues with remaining players.
-- Forfeit in a tournament room counts as a loss for that match; the player is eliminated from the tournament.
-- A player who reconnects within the window resumes with their original hand intact.
+    - A disconnected player has a **60-second reconnection window** before being considered inactive.
+    - During the reconnection window, the disconnected player's turn is skipped (as if they passed), and no bot substitution occurs.
+    - If the window expires during the player's turn, an automatic forfeit is issued.
+    - Forfeit in a casual room ends the player's participation; the game continues with remaining players.
+    - Forfeit in a tournament room counts as a loss for that match; the player is eliminated from the tournament.
+    - A player who reconnects within the window resumes with their original hand intact.
 - **Round-Based Tournament Progression Rules:** Tournaments proceed in elimination rounds until 10 or fewer players remain, at which point a final room is created. Each round, players are distributed into rooms of up to 10 players. Within a room, players play a **best-of-three series** (a "match" = up to 3 individual games). The **top 3 players** by match wins advance; in case of a tie, the player with the lower cumulative card-point total in the tied games advances. If still tied, advancement order is determined by earliest time of final-game completion.
 - **Security Hardening, Session Control & Rate Limiting:** Include strong auth boundaries, input validation, signed event integrity where needed, and audit logs for sensitive operations. Enforce single-active-session per player (new login invalidates old session). Apply multi-layer rate limits (per IP, per user, per room/tournament action) with adaptive throttling.
 - **Tournament Analytics & Bracket Read Models:** The platform must absorb spikes of game.completed events and update read-optimized views for player stats and bracket visualization.
