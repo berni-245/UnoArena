@@ -3,73 +3,73 @@
 ```mermaid
 sequenceDiagram
     participant Player
-    participant RoomAggregate
+    participant GameAggregate as Game Aggregate
     participant GameLog
     participant NextPlayer
     participant Opponents
     participant SpectatorView
 
     %% === Play Card Path ===
-    Player->>RoomAggregate: PlayCard(cardId, seqNum)
-    RoomAggregate->>RoomAggregate: Validate correct turn, valid card, correct seqNum
+    Player->>GameAggregate: PlayCard(cardId, seqNum)
+    GameAggregate->>GameAggregate: Validate correct turn, valid card, correct seqNum
 
     alt Invalid command
-        RoomAggregate-->>Player: CommandRejected (409)
+        GameAggregate-->>Player: CommandRejected (409)
     else Valid command
-        RoomAggregate->>GameLog: Append CardPlayed event
-        GameLog-->>RoomAggregate: Event persisted
+        GameAggregate->>GameLog: Append CardPlayed event
+        GameLog-->>GameAggregate: Event persisted
 
         alt Card is Skip
-            RoomAggregate->>RoomAggregate: Apply Skip (next player loses turn)
+            GameAggregate->>GameAggregate: Apply Skip (next player loses turn)
         else Card is Reverse
-            RoomAggregate->>RoomAggregate: Apply Reverse (flip turn order)
+            GameAggregate->>GameAggregate: Apply Reverse (flip turn order)
         else Card is DrawTwo
-            RoomAggregate->>RoomAggregate: Apply DrawTwo (next player draws 2)
-            RoomAggregate->>NextPlayer: ForceDraw(2)
+            GameAggregate->>GameAggregate: Apply DrawTwo (next player draws 2)
+            GameAggregate->>NextPlayer: ForceDraw(2)
         else Card is Wild
-            RoomAggregate->>RoomAggregate: Apply Wild (color chosen by player)
+            GameAggregate->>GameAggregate: Apply Wild (color chosen by player)
         else Card is WildDrawFour
-            RoomAggregate->>RoomAggregate: Apply WildDrawFour (color chosen, next draws 4)
-            RoomAggregate->>NextPlayer: ForceDraw(4)
+            GameAggregate->>GameAggregate: Apply WildDrawFour (color chosen, next draws 4)
+            GameAggregate->>NextPlayer: ForceDraw(4)
         end
 
         alt Penultimate card played (1 card remaining)
-            RoomAggregate->>Opponents: ChallengeWindowOpened
-            Note over RoomAggregate,Opponents: 5-second timer for UNO challenge
+            GameAggregate->>Opponents: ChallengeWindowOpened
+            Note over GameAggregate,Opponents: 5-second timer for UNO challenge
         end
 
         alt Last card played (0 cards remaining)
-            RoomAggregate->>GameLog: Append GameCompleted event
-            RoomAggregate->>Player: GameCompleted
-            RoomAggregate->>Opponents: GameCompleted
-            RoomAggregate->>SpectatorView: GameCompleted
+            GameAggregate->>GameLog: Append GameCompleted event
+            GameAggregate->>Player: GameCompleted
+            GameAggregate->>Opponents: GameCompleted
+            GameAggregate->>SpectatorView: GameCompleted
         else Cards remaining
-            RoomAggregate->>NextPlayer: TurnAdvanced
-            RoomAggregate->>SpectatorView: Update view (filtered, no private data)
+            GameAggregate->>NextPlayer: TurnAdvanced
+            GameAggregate->>SpectatorView: Update view (filtered, no private data)
         end
     end
 
     %% === Draw Card Path ===
-    Player->>RoomAggregate: DrawCard(seqNum)
-    RoomAggregate->>RoomAggregate: Validate correct turn, correct seqNum
+    Player->>GameAggregate: DrawCard(seqNum)
+    GameAggregate->>GameAggregate: Validate correct turn, correct seqNum
 
     alt Invalid command
-        RoomAggregate-->>Player: CommandRejected (409)
+        GameAggregate-->>Player: CommandRejected (409)
     else Valid command
-        RoomAggregate->>GameLog: Append CardDrawn event
-        GameLog-->>RoomAggregate: Event persisted
-        RoomAggregate-->>Player: CardDrawn(drawnCard)
+        GameAggregate->>GameLog: Append CardDrawn event
+        GameLog-->>GameAggregate: Event persisted
+        GameAggregate-->>Player: CardDrawn(drawnCard)
 
         alt Drawn card is playable
-            Player->>RoomAggregate: PlayCard(drawnCardId, seqNum)
-            RoomAggregate->>GameLog: Append CardPlayed event
-            RoomAggregate->>NextPlayer: TurnAdvanced
-            RoomAggregate->>SpectatorView: Update view (filtered, no private data)
+            Player->>GameAggregate: PlayCard(drawnCardId, seqNum)
+            GameAggregate->>GameLog: Append CardPlayed event
+            GameAggregate->>NextPlayer: TurnAdvanced
+            GameAggregate->>SpectatorView: Update view (filtered, no private data)
         else Drawn card is not playable
-            RoomAggregate->>RoomAggregate: Auto PassTurn
-            RoomAggregate->>GameLog: Append TurnPassed event
-            RoomAggregate->>NextPlayer: TurnAdvanced
-            RoomAggregate->>SpectatorView: Update view (filtered, no private data)
+            GameAggregate->>GameAggregate: Auto PassTurn
+            GameAggregate->>GameLog: Append TurnPassed event
+            GameAggregate->>NextPlayer: TurnAdvanced
+            GameAggregate->>SpectatorView: Update view (filtered, no private data)
         end
     end
 ```

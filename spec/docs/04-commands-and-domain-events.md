@@ -1589,6 +1589,35 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### PlayerThrottled
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `PlayerThrottled` |
+| **Context** | IS |
+| **Triggering Policy** | Adaptive rate-limiting policy: player exceeds per-player command rate threshold persistently |
+| **Aggregate** | `PlayerIdentity` |
+
+**Key Payload Fields:**
+```
+{
+  playerId     : UUID
+  reason       : enum     // "excessive_command_rate" | "excessive_login_attempts"
+                          // | "excessive_room_creation"
+  throttleLevel : enum    // "warning" | "soft_block" | "hard_block"
+  throttledAt  : ISO-8601
+  expiresAt    : ISO-8601    // When the throttle lifts (auto-decaying)
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Audit & Game Log | Append for abuse pattern analysis. |
+| Room Gameplay (gateway layer) | Enforce reduced rate limit for this player until `expiresAt`. |
+
+---
+
 ### 4.3.2 Room Gameplay Events
 
 ---
@@ -2480,6 +2509,31 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### ReconnectionTimerCancelled
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `ReconnectionTimerCancelled` |
+| **Context** | RG (internal) |
+| **Triggering Policy** | Post-`PlayerReconnected` policy (player reconnected within window) |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId     : UUID
+  playerId   : UUID
+  cancelledAt : ISO-8601
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Audit & Game Log | Append (confirms reconnection window was properly closed). |
+
+---
+
 #### PlayerReconnected
 
 | Field | Value |
@@ -2794,6 +2848,36 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 |----------|----------|
 | Client | Reconcile local state from SSE stream and retry if appropriate. |
 | Audit & Game Log | Append (for detecting abuse, e.g., clients sending illegal plays repeatedly). |
+
+---
+
+#### RoomCancelled
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `RoomCancelled` |
+| **Context** | RG |
+| **Triggering Policy** | `TournamentCancelled` propagation — TO instructs RG to cancel all active rooms in the tournament round |
+| **Aggregate** | `Room` |
+
+**Key Payload Fields:**
+```
+{
+  roomId        : UUID
+  tournamentId  : UUID
+  roundId       : UUID
+  reason        : enum    // "tournament_cancelled" | "admin_force_cancel"
+  cancelledAt   : ISO-8601
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Close game projection. Display cancellation notice. |
+| Audit & Game Log | Append with reason. |
+
+**Note:** `RoomCancelled` is distinct from `RoomCompleted(outcome: "abandoned")`. Cancellation means the room was externally terminated (e.g., by tournament cancellation), whereas abandonment means all players forfeited within normal gameplay.
 
 ---
 
@@ -3389,6 +3473,38 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### TournamentPlacementRatingUpdated
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `TournamentPlacementRatingUpdated` |
+| **Context** | RK |
+| **Triggering Policy** | Reaction to `TournamentCompleted` from TO |
+| **Aggregate** | `PlayerRating` |
+
+**Key Payload Fields:**
+```
+{
+  playerId                   : UUID
+  tournamentId               : UUID
+  tournamentPlacement        : uint8      // Final position in the tournament
+  oldPlacementRating         : int32
+  newPlacementRating         : int32
+  delta                      : int32
+  updatedAt                  : ISO-8601
+}
+```
+
+**Note:** Tournament placement ratings are **separate** from global Elo. Global Elo is updated per casual game only (via `EloUpdated`). Tournament placement ratings reflect a player's performance across tournaments and are updated once per tournament completion, based on final standing. This event does NOT affect the global Elo leaderboard.
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Audit & Game Log | Append. |
+| Public read model | Update player's tournament rating in profile. |
+
+---
+
 ### 4.3.5 Spectator View Events
 
 The Spectator View context consumes raw Room Gameplay events, passes them through its Anti-Corruption Layer (ACL), strips all private data (card identities in hands, deck seeds), and produces a single published event:
@@ -3467,6 +3583,30 @@ The ACL produces one of the following spectator-safe sub-events within `spectato
 ```
 
 **Consumers:** Operational monitoring systems (not domain consumers).
+
+---
+
+#### SuspiciousTimingPattern
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `SuspiciousTimingPattern` |
+| **Context** | AL |
+| **Triggering Policy** | Audit pattern analysis: repeated near-boundary submissions from the same player (e.g., challenge attempts at the exact millisecond of window expiry) |
+| **Aggregate** | `AuditTrail` |
+
+**Key Payload Fields:**
+```
+{
+  playerId       : UUID
+  reason         : enum     // "repeated_boundary_submissions" | "timing_exploit_attempt"
+  occurrenceCount : uint32   // Number of suspicious submissions in the detection window
+  detectionWindow : string   // e.g., "last_10_minutes"
+  detectedAt     : ISO-8601
+}
+```
+
+**Consumers:** Operational monitoring and abuse prevention systems. May feed into `PlayerSuspended` workflow if pattern is persistent.
 
 ---
 
