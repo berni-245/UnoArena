@@ -690,6 +690,56 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### ChallengeWildDrawFour
+
+| Field | Value |
+|-------|-------|
+| **Command Name** | `ChallengeWildDrawFour` |
+| **Context** | Room Gameplay (RG) |
+| **Issuer** | Player (the affected next player — the one who would draw 4 cards from the Wild Draw Four) |
+| **Target Aggregate** | `Game` |
+| **Requires Session Token** | Yes |
+| **Requires Sequence Number** | No (time-sensitive) |
+
+**Payload:**
+```
+{
+  gameId         : UUID
+  challengerId   : UUID    // The affected next player challenging the WDF play
+}
+```
+
+**Preconditions:**
+1. Challenger has a valid, active session.
+2. Game is in `in_progress` state.
+3. A WDF Challenge Window is currently open (a Wild Draw Four was played within the last 5 seconds).
+4. `challengerId` is the affected next player (the player who would draw 4 cards). No other player may issue this challenge.
+
+**Resulting Events (happy path):**
+- `WildDrawFourChallengeMade` with `gameId`, `challengerId`, `challengedPlayerId`.
+- Server adjudicates by comparing the challenged player's hand snapshot against the active color at the time of the WDF play:
+  - If the challenged player **held** at least one card matching the active color (bluff):
+    - `WildDrawFourChallengeResolved` with `outcome = bluff_confirmed`.
+    - `PenaltyCardsDrawn` for the challenged player (4 cards, `reason = wdf_challenge_bluff_confirmed`).
+    - The affected player (challenger) draws 0 cards.
+  - If the challenged player **did not hold** any card matching the active color (legitimate play):
+    - `WildDrawFourChallengeResolved` with `outcome = legitimate_play`.
+    - `PenaltyCardsDrawn` for the challenger (6 cards: 4 WDF effect + 2 penalty, `reason = wdf_challenge_legitimate_play`).
+- In both cases: `WildDrawFourChallengeWindowClosed`.
+
+**Rejection Reasons:**
+| Reason Code | HTTP Status | Description |
+|-------------|-------------|-------------|
+| `invalid_session` | 401 | Session token is invalid or expired |
+| `no_wdf_challenge_window_open` | 409 | No WDF challenge window is active |
+| `wdf_window_expired` | 409 | The 5-second WDF challenge window has elapsed |
+| `not_the_affected_player` | 403 | Challenger is not the player affected by the Wild Draw Four |
+
+**Idempotency Behavior:**
+- Replaying with the same `commandId` returns the cached WDF challenge resolution. The challenge is not re-resolved.
+
+---
+
 #### Reconnect
 
 | Field | Value |
@@ -2224,6 +2274,131 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### WildDrawFourChallengeWindowOpened
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `WildDrawFourChallengeWindowOpened` |
+| **Context** | RG |
+| **Triggering Policy** | Wild Draw Four card play detected after `CardPlayed` |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId              : UUID
+  challengedPlayerId  : UUID        // Player who played the Wild Draw Four
+  affectedPlayerId    : UUID        // Next player in turn order (only eligible challenger)
+  declaredColor       : enum        // Color declared by the WDF player
+  activeColorAtTimeOfPlay : enum    // Active color before the WDF was played
+  windowDuration      : uint8       // 5 (seconds)
+  windowDeadline      : ISO-8601
+  openedAt            : ISO-8601
+}
+```
+
+**Note:** The `activeColorAtTimeOfPlay` is published so the affected player understands what color was active (and thus what color the challenged player should not have had). The `challengedPlayerHandSnapshot` is NOT included — it is private server-side data used only for adjudication.
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Display WDF challenge window UI indicator. |
+| Affected player (private channel) | Notify of option to challenge or accept draw. |
+| Room Gameplay (internal) | Start 5-second timer; close window on expiry. |
+| Audit & Game Log | Append. |
+
+---
+
+#### WildDrawFourChallengeMade
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `WildDrawFourChallengeMade` |
+| **Context** | RG |
+| **Triggering Command** | `ChallengeWildDrawFour` |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId             : UUID
+  challengerId       : UUID        // Affected player who issued the challenge
+  challengedPlayerId : UUID        // Player who played the Wild Draw Four
+  challengedAt       : ISO-8601
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Display challenge action. |
+| Audit & Game Log | Append. |
+
+---
+
+#### WildDrawFourChallengeResolved
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `WildDrawFourChallengeResolved` |
+| **Context** | RG |
+| **Triggering Policy** | WDF challenge adjudication after `WildDrawFourChallengeMade` |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId                          : UUID
+  challengerId                    : UUID
+  challengedPlayerId              : UUID
+  outcome                         : enum     // "bluff_confirmed" | "legitimate_play"
+  challengedPlayerHadMatchingColor: boolean   // true = bluff, false = legitimate
+  penalizedPlayerId               : UUID
+  penaltyCardCount                : uint8    // 4 (bluff) or 6 (legitimate)
+  penaltyCards                    : [CardIdentity]    // PRIVATE: full card identities for penalized player
+  resolvedAt                      : ISO-8601
+}
+```
+
+**Privacy:** The `challengedPlayerHadMatchingColor` boolean is the only hand-derived information published. The actual card identities in the snapshot are never revealed. The `penaltyCards` field is private and must be stripped by the Spectator View's ACL. Spectators see only the outcome, penalized player, and card count.
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View (via ACL) | Receive stripped version: outcome, penalized player, and card count only. |
+| Affected players (private channels) | Receive full penalty card identities. |
+| Audit & Game Log | Append full event with card identities and hand snapshot reference. |
+
+---
+
+#### WildDrawFourChallengeWindowClosed
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `WildDrawFourChallengeWindowClosed` |
+| **Context** | RG |
+| **Triggering Policy** | Timer expiry, or `WildDrawFourChallengeResolved`, or affected player accepts draw |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId              : UUID
+  challengedPlayerId  : UUID
+  affectedPlayerId    : UUID
+  reason              : enum     // "expired" | "challenge_resolved" | "draw_accepted"
+  closedAt            : ISO-8601
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Clear WDF challenge window UI indicator. |
+| Audit & Game Log | Append. |
+
+---
+
 ---
 
 #### PenaltyCardsDrawn
@@ -2232,7 +2407,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 |-------|-------|
 | **Event Name** | `PenaltyCardsDrawn` |
 | **Context** | RG |
-| **Triggering Policy** | Draw Two effect, Wild Draw Four effect, failed challenge penalty, missed Uno call penalty, first-card Draw Two |
+| **Triggering Policy** | Draw Two effect, Wild Draw Four effect, failed Uno challenge penalty, missed Uno call penalty, WDF challenge bluff penalty, WDF challenge legitimate play penalty, first-card Draw Two |
 | **Aggregate** | `Game` |
 
 **Key Payload Fields -- FULL VERSION (private):**
@@ -2244,6 +2419,8 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
   cards        : [CardIdentity]    // PRIVATE: identities of penalty cards drawn
   reason       : enum    // "draw_two_card" | "wild_draw_four_card"
                          // | "failed_uno_challenge" | "missed_uno_call"
+                         // | "wdf_challenge_bluff_confirmed"
+                         // | "wdf_challenge_legitimate_play"
                          // | "first_card_draw_two"
   newHandSize  : uint8
   drawnAt      : ISO-8601

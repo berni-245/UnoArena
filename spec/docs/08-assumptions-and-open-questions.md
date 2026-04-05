@@ -73,8 +73,8 @@ The 5-second challenge window (V10) starts from the moment the server processes 
 **A8: Next player's action closes the challenge window immediately.**
 If the next player in turn order submits a valid action (plays a card or draws) before the 5-second window expires, the challenge window closes immediately. A challenge command must be received and processed by the server before the next player's action is processed. Late challenges are rejected.
 
-**A9: WildDrawFour challenge rules are not implemented.**
-Standard Uno rules allow challenging a WildDrawFour play (claiming the player had a playable card of the matching color). The specification does not mention this mechanic. To reduce complexity and edge cases in the initial model, we do not implement WildDrawFour challenges. A WildDrawFour is always treated as a legal play. **This is flagged as open question Q3 for stakeholder confirmation.**
+**A9: WildDrawFour legality is not server-enforced; bluffing is permitted.**
+The server does not validate whether the player holds cards matching the active color when a Wild Draw Four is played. This is a deliberate design choice: enforcement of the color-match rule occurs exclusively through the WDF Challenge mechanism (term 22b), preserving the strategic bluff element from official Uno rules. The full WDF Challenge mechanic — windows, adjudication, and penalties — is specified in 03 (INV-G-09, INV-G-23–25), 04 (ChallengeWildDrawFour command, WDF events), 05 (WDF Challenge Sub-Flow), and 06 (edge cases 6.7.9–6.7.11). Previously resolved via Q3.
 
 **A10: Standard 108-card Uno deck composition.**
 The deck follows standard Uno composition: 108 cards total. Per color (Red, Yellow, Green, Blue): one 0 card, two each of 1--9, two Skip, two Reverse, two DrawTwo. Plus four Wild and four WildDrawFour cards. This is consistent with the standard Uno rules referenced in the specification.
@@ -248,13 +248,13 @@ Each question identifies a real ambiguity in the specification that affects the 
 
 ---
 
-### Q3: WildDrawFour Challenge Rules
+### Q3: WildDrawFour Challenge Rules — RESOLVED
 
-**The ambiguity:** Standard Uno rules allow a player who receives a WildDrawFour to challenge it, claiming the playing player had a card of the matching color and therefore played the WildDrawFour illegally. The specification does not mention this mechanic.
+**The ambiguity:** Standard Uno rules allow a player who receives a WildDrawFour to challenge it, claiming the playing player had a card of the matching color and therefore played the WildDrawFour illegally. The specification did not originally include this mechanic.
 
-**Why it matters:** The WildDrawFour challenge is a strategically significant mechanic that adds complexity (the server must verify the challenged player's hand at the time of the play, which has privacy implications). Including it adds depth; excluding it simplifies the model.
+**Why it matters:** The WildDrawFour challenge is a strategically significant mechanic that adds depth. The server must snapshot the challenged player's hand at the time of the play for adjudication, which has privacy implications (resolved: only a boolean "had matching color" is revealed, not card identities).
 
-**Our working assumption (A9):** Do not implement WildDrawFour challenges in the initial model. A WildDrawFour is always treated as a legal play. This can be added as a future enhancement if stakeholders require it.
+**Resolution (A9 updated):** Implement WildDrawFour challenges with bluff-permitted semantics. The server accepts all WDF plays without color-match validation. The affected next player may challenge within a 5-second window. Adjudication checks the challenged player's hand snapshot. Penalty: bluff confirmed → playing player draws 4; legitimate play → challenger draws 6 (4 + 2 penalty). See 01 (Glossary terms 22b–22c), 03 (INV-G-09, INV-G-23, WildDrawFourChallengeWindow VO), 04 (ChallengeWildDrawFour command, WDF events), 05 (WDF Challenge Sub-Flow), 06 (edge cases 6.7.3–6.7.5).
 
 ---
 
@@ -383,7 +383,7 @@ For convenience, the following table maps each assumption to the deliverables an
 | A3 (push-based updates) | Client state synchronization | 06 (Edge Cases), 07 (Consistency/Recovery) |
 | A4 (disconnection detection) | Reconnection window trigger | 05 (Event Flows), 06 (Edge Cases) |
 | A5--A8 (Uno call mechanics) | Game aggregate, challenge window | 03 (Aggregates), 04 (Commands/Events), 05 (Event Flows) |
-| A9 (no WildDrawFour challenge) | Game rules simplification | 03 (Aggregates), 04 (Commands/Events) |
+| A9 (WildDrawFour challenge with bluff semantics) | Game aggregate, challenge window, hand snapshot | 01 (Glossary), 03 (Aggregates), 04 (Commands/Events), 05 (Event Flows), 06 (Edge Cases) |
 | A10 (deck composition) | Deck value object | 01 (Glossary), 03 (Aggregates) |
 | A11 (draw pile recycling) | Game aggregate, game log | 03 (Aggregates), 04 (Commands/Events), 06 (Edge Cases) |
 | A12 (draw-then-play-or-pass) | Turn state machine | 03 (Aggregates), 04 (Commands/Events) |
@@ -407,7 +407,7 @@ For convenience, the following table maps each assumption to the deliverables an
 |----------|----------|----------------------|
 | Q1: Best-of-three multi-player semantics | CRITICAL | Yes -- affects core match/tournament logic |
 | Q2: Early match termination | HIGH | Partially -- affects tournament round timing |
-| Q3: WildDrawFour challenge | MEDIUM | No -- simplified model works without it |
+| Q3: WildDrawFour challenge | MEDIUM | Resolved -- implemented with bluff-permitted semantics (A9) |
 | Q4: Turn timer | HIGH | Yes -- needed to prevent tournament blocking |
 | Q5: Spectator Uno call visibility | LOW | No -- current assumption is safe |
 | Q6: Forfeited player's cards | MEDIUM | No -- both options are implementable |

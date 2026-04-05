@@ -119,7 +119,7 @@ This phase repeats for every turn until a player empties their hand or the game 
 - c) The `cardId` exists in the player's hand.
 - d) The card is a legal play given the current discard pile top card and declared color:
     - Same color, same number, same action symbol, or Wild/Wild Draw Four.
-    - Wild Draw Four has an additional legality constraint: the player must not hold any card matching the current color (honor system in casual, but server-enforced in UnoArena).
+    - Wild Draw Four: the server accepts the play without validating whether the player holds cards matching the active color (A9). This permits strategic bluffing — enforcement of the color-match rule occurs exclusively through the WDF Challenge mechanism (see WDF Challenge Sub-Flow, steps 36b--36h).
 - e) If the card is Wild or Wild Draw Four: a `declaredColor` must be provided (red, blue, green, or yellow).
 - If any validation fails: `CommandRejected` with reason code (e.g., `NotYourTurn`, `InvalidCard`, `StaleSequenceNumber`). The client reconciles state via SSE.
 
@@ -134,7 +134,7 @@ This phase repeats for every turn until a player empties their hand or the game 
 - **Reverse**: `DirectionReversed` emitted. The turn order direction toggles. In a 2-player game, Reverse acts as Skip.
 - **Draw Two**: `PenaltyCardsDrawn` emitted. The next player draws 2 cards from the deck (server-side, authoritative). Their turn is skipped. `PlayerSkipped` emitted.
 - **Wild**: `ColorDeclared` emitted with the chosen color. The declared color becomes the active color for matching.
-- **Wild Draw Four**: `ColorDeclared` emitted. The next player draws 4 cards (`PenaltyCardsDrawn` with `cardCount = 4`). Their turn is skipped. `PlayerSkipped` emitted.
+- **Wild Draw Four**: `ColorDeclared` emitted. A `WildDrawFourChallengeWindowOpened` is emitted — the affected next player has 5 seconds to challenge or accept. Proceed to the WDF Challenge Sub-Flow (steps 36b--36h). The draw of 4 cards and turn skip are deferred until the WDF challenge window resolves.
 
 **21.** After `CardPlayed` -- check for Uno condition:
 - If the player now has exactly **1 card** remaining:
@@ -219,6 +219,63 @@ This phase repeats for every turn until a player empties their hand or the game 
 - If both arrive within the same processing cycle, Uno is considered called.
 
 **35.** After the challenge window closes (by any path), normal gameplay resumes from step 26.
+
+---
+
+### Wild Draw Four Challenge Sub-Flow (steps 36b--36h)
+
+This sub-flow is triggered by step 20 when a Wild Draw Four is played. It runs **before** the affected next player draws cards or has their turn skipped.
+
+**36b.** `WildDrawFourChallengeWindowOpened` is emitted (from step 20). The 5-second window begins.
+- The server captures a snapshot of the playing player's hand at the moment of the WDF play (before the card is removed). This snapshot is stored server-side for adjudication and is never transmitted to clients.
+- The `activeColorAtTimeOfPlay` (the color that was active before the WDF was played) is recorded.
+
+**36c.** **Path A -- Affected player challenges the WDF play:**
+- The affected next player issues `ChallengeWildDrawFour` with `gameId`, `challengerId`.
+- Validated: the WDF challenge window is still open, the challenger is the affected player.
+- `WildDrawFourChallengeMade` with `gameId`, `challengerId`, `challengedPlayerId`.
+
+**36d.** WDF Challenge resolution:
+- The server compares the challenged player's hand snapshot against `activeColorAtTimeOfPlay`.
+
+- **If the challenged player held at least one card matching the active color (bluff confirmed):**
+    - The challenge succeeds. The challenged player (who played the WDF) is penalized.
+    - `WildDrawFourChallengeResolved` with `outcome = bluff_confirmed`.
+    - **Policy: PenalizeWdfBluff** -- the challenged player draws 4 penalty cards.
+    - `PenaltyCardsDrawn` with `playerId = challengedPlayerId`, `cardCount = 4`, `reason = wdf_challenge_bluff_confirmed`.
+    - The affected player (challenger) draws **0 cards** — the WDF draw effect is nullified.
+    - The declared color remains in effect (the WDF card stays on the discard pile).
+    - The affected player's turn is **not skipped** — they proceed to play normally.
+
+- **If the challenged player held no card matching the active color (legitimate play):**
+    - The challenge fails. The affected player (challenger) is penalized.
+    - `WildDrawFourChallengeResolved` with `outcome = legitimate_play`.
+    - **Policy: PenalizeFalseWdfChallenge** -- the challenger draws 6 cards (4 WDF effect + 2 penalty).
+    - `PenaltyCardsDrawn` with `playerId = challengerId`, `cardCount = 6`, `reason = wdf_challenge_legitimate_play`.
+    - The challenger's turn is skipped. `PlayerSkipped` emitted.
+
+**36e.** **Path B -- Affected player accepts the draw (no challenge):**
+- The affected player does not issue a challenge within the 5-second window (either explicitly or by timeout).
+- `WildDrawFourChallengeWindowClosed` with `reason = expired` or `reason = draw_accepted`.
+- The standard WDF effect proceeds: `PenaltyCardsDrawn` with `playerId = affectedPlayerId`, `cardCount = 4`, `reason = wild_draw_four_card`.
+- The affected player's turn is skipped. `PlayerSkipped` emitted.
+
+**36f.** **Path C -- WDF Challenge Window and Uno Challenge Window coexist:**
+- If the Wild Draw Four was the playing player's penultimate card (leaving exactly 1 card), both windows open simultaneously:
+    - `WildDrawFourChallengeWindowOpened` (for the affected player).
+    - `UnoChallengeWindowOpened` (for all opponents, including the affected player).
+- The two windows are independent. Each follows its own resolution rules (INV-G-25).
+- The WDF challenge window is resolved first (it gates the draw effect), then the Uno challenge window proceeds normally.
+
+**36g.** After the WDF challenge window closes (by any path):
+- `TurnAdvanced` is emitted if the affected player's turn was skipped (Paths A-legitimate, B).
+- If the affected player's turn was NOT skipped (Path A-bluff), the affected player takes their normal turn.
+- Normal gameplay resumes from step 26.
+
+**36h.** Read model updates after WDF challenge resolution:
+- `SpectatorGameStateReadModel` updated: challenge outcome (bluff/legitimate), card count changes, turn indicator.
+- `PlayerGameStateReadModel` updated for the affected and challenged players.
+- `GameLogReadModel` appended with full WDF challenge event chain for audit trail.
 
 ---
 

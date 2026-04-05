@@ -227,7 +227,7 @@ The Game's turn-level state machine operates within the broader `GamePhase`. Eve
 - **INV-G-06 (Challenge Window Timing — Server Authoritative):** The Challenge Window opens at the moment the server processes the penultimate card play. The window closes upon the earliest of: (a) 5 seconds elapsed since server processing (V10, A7), (b) a valid Challenge command received and processed, or (c) the next player in turn order submitting a valid action (A8). Late challenges (received after any of these conditions) are rejected.
 - **INV-G-07 (Challenge Adjudication):** A challenge is valid if and only if the challenged player played their penultimate card without having issued a Uno call (neither bundled with the card play nor as a separate command within the window per A5, A6). If the call was made, the challenger receives a Penalty Draw of 2 cards. If the call was not made, the challenged player receives a Penalty Draw of 2 cards (term 22).
 - **INV-G-08 (Wild Card Color Declaration):** Every `PlayCard` command involving a Wild or Wild Draw Four card must include a `ColorDeclaration`. A Wild play without a Color Declaration is rejected. The Color Declaration becomes the effective color of the Top Card immediately upon acceptance (term 29).
-- **INV-G-09 (Wild Draw Four Legality):** Wild Draw Four is always treated as a legal play in UnoArena regardless of the player's hand contents (A9). The Wild Draw Four challenge variant is not implemented.
+- **INV-G-09 (Wild Draw Four — Bluff-Permitted Acceptance):** The server accepts all Wild Draw Four plays without validating whether the player holds cards matching the active color (A9). This permits strategic bluffing. Enforcement of the color-match rule occurs exclusively through the WDF Challenge mechanism: the affected next player may challenge within a 5-second window (term 22b). If no challenge is issued, the play stands and the affected player draws 4 cards.
 - **INV-G-10 (Draw Stacking):** Draw Two and Wild Draw Four effects are not stackable. The affected next player must draw the prescribed number of cards and forfeit their turn; they may not play another Draw Two or Wild Draw Four to redirect the effect (design constraint per requirements).
 - **INV-G-11 (Reconnection Window):** A player detected as disconnected (A4) receives exactly one Reconnection Window of 60 seconds (V9). During this window, their turns are auto-skipped (term 60). No extensions or pauses to the Reconnection Window are permitted. The window is a fixed domain value.
 - **INV-G-12 (Reconnection Window Expiry — Turn Forfeit):** If the Reconnection Window expires while it is the disconnected player's turn (i.e., `currentPlayerId` equals the disconnected player when the window expires), an automatic Forfeit is issued (V18). The player's hand is removed from the game entirely (A36).
@@ -241,6 +241,9 @@ The Game's turn-level state machine operates within the broader `GamePhase`. Eve
 - **INV-G-20 (Placement Order Finalization):** When the Game reaches `Completed`, the `placementOrder` is finalized as follows: 1st place = the player who emptied their Hand; remaining positions assigned by ascending card point total; ties within the remaining positions broken by turn proximity to the winner (A14). This value is immutable once set.
 - **INV-G-21 (Idempotency — Drawn Card):** For each turn, a player may draw at most one card voluntarily or via automatic draw (A12). A second `DrawCard` command within the same turn is rejected unless it is a replay of an already-processed command (detected via Idempotency Key).
 - **INV-G-22 (Server-Authoritative RNG):** All card dealing, draw pile ordering, and reshuffle operations are exclusively server-generated. No client-provided seed or card-order preference is accepted at any time (V11).
+- **INV-G-23 (Wild Draw Four Challenge Adjudication):** When a `ChallengeWildDrawFour` command is received within an open WDF Challenge Window, the server compares the challenged player's hand snapshot (captured at the moment the Wild Draw Four was played) against the active color at that moment. If the snapshot contains at least one card matching the active color, the outcome is `bluff_confirmed`: the challenged player (who played the WDF) draws 4 penalty cards, and the affected player draws none. If the snapshot contains no card matching the active color, the outcome is `legitimate_play`: the affected player (challenger) draws 6 cards (4 original WDF effect + 2 penalty). The hand snapshot is never revealed to other players or spectators; only the boolean outcome (`challengedPlayerHadMatchingColor`) and the penalty assignment are published.
+- **INV-G-24 (WDF Challenge Window Timing — Server Authoritative):** The WDF Challenge Window opens at the moment the server processes a Wild Draw Four card play. The window closes upon the earliest of: (a) 5 seconds elapsed since server processing (A7 applies symmetrically), (b) a valid `ChallengeWildDrawFour` command received and processed, or (c) the affected player explicitly accepting the draw (issuing `DrawCard` or the window expiring). Only the affected next player (the one who would draw 4 cards) may issue a challenge within this window. Late challenges are rejected.
+- **INV-G-25 (WDF Challenge Window and Uno Challenge Window Coexistence):** When a Wild Draw Four is played as a penultimate card (leaving the playing player with exactly 1 card), both a WDF Challenge Window and an Uno Challenge Window open simultaneously. They are independent: the WDF window is exclusive to the affected next player, while the Uno window is open to all opponents. Each window follows its own closure rules and resolution logic. Resolution of one does not close or affect the other.
 
 #### Children
 
@@ -436,6 +439,28 @@ Represents the server-enforced 5-second Uno challenge window (V10, A7).
 - `deadline` is always exactly `openedAt + 5 seconds`. No extensions are permitted (V10, A7).
 - The server evaluates window closure on every command received while the window is `Open`. The three closure conditions are mutually exclusive first-occurrence: whichever condition is detected first wins.
 - A ChallengeWindow with `status = Open` and a `deadline` in the past is treated as `ClosedByTimeout` in any subsequent command evaluation.
+
+---
+
+#### WildDrawFourChallengeWindow
+
+Represents the server-enforced 5-second Wild Draw Four challenge window (A9, term 22c).
+
+| Attribute | Type | Constraints |
+|-----------|------|-------------|
+| `openedAt` | timestamp | Server time at which the window opened (moment of Wild Draw Four card play processing). |
+| `deadline` | timestamp | Exactly `openedAt + 5 seconds`. |
+| `status` | `WdfChallengeWindowStatus` enum | `Open`, `ClosedByTimeout`, `ClosedByChallenge`, `ClosedByDrawAccepted`. |
+| `challengedPlayerId` | `PlayerId` | The player who played the Wild Draw Four and triggered the window. |
+| `affectedPlayerId` | `PlayerId` | The next player in turn order who would draw 4 cards. This is the only player permitted to issue a challenge. |
+| `activeColorAtTimeOfPlay` | `Color` enum | The active color on the discard pile immediately before the Wild Draw Four was played. Used for adjudication. |
+| `challengedPlayerHandSnapshot` | `[CardIdentity]` | A server-side snapshot of the challenged player's hand at the exact moment the Wild Draw Four was played (before the card was removed). Used exclusively for adjudication; never transmitted to clients. |
+
+- The window is a Value Object: once created, it is never modified. A new instance with an updated `status` replaces the old one in the Game aggregate's state.
+- `deadline` is always exactly `openedAt + 5 seconds`. No extensions are permitted (A7 applies symmetrically).
+- Only the `affectedPlayerId` may issue a `ChallengeWildDrawFour` command while the window is `Open`.
+- The `challengedPlayerHandSnapshot` is private server-side data. It is never included in any event payload sent to clients or spectators. Only the adjudication result (`challengedPlayerHadMatchingColor: boolean`) is published.
+- A WildDrawFourChallengeWindow with `status = Open` and a `deadline` in the past is treated as `ClosedByTimeout` in any subsequent command evaluation.
 
 ---
 

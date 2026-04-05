@@ -1074,6 +1074,74 @@ All reshuffle seeds are recorded in the game log for replay and audit (A11).
 - INV-T8: If the tiebreak chain is exhausted without a unique ranking, all tied players are advanced (rather than eliminated). No player is arbitrarily excluded.
 - INV-T9: The next round's room assignment algorithm must handle variable room sizes produced by tiebreaker overflow.
 
+### 6.7.9 Wild Draw Four Challenge Coincides with Uno Call Window
+
+**Description.** A player plays a Wild Draw Four as their penultimate card, leaving exactly 1 card in their hand. This triggers two simultaneous windows: a WDF Challenge Window (for the affected next player to challenge the WDF legality) and an Uno Challenge Window (for any opponent to challenge the Uno call).
+
+**Root cause.** The Wild Draw Four is both (a) a card that can be challenged for legality and (b) the penultimate card that triggers the Uno call obligation. Both mechanics activate independently.
+
+**Detection mechanism.** The Game aggregate checks post-play conditions: `card.type == WildDrawFour` triggers WDF window; `handSize == 1` triggers Uno window. Both conditions are true simultaneously.
+
+**Domain behavior.** Both windows coexist and are resolved independently (INV-G-25):
+- The WDF Challenge Window is exclusive to the affected next player and resolves the draw effect.
+- The Uno Challenge Window is open to all opponents (including the affected player) and resolves the Uno call obligation.
+- Resolution of one window does not close or affect the other.
+- The WDF window is resolved first because it gates the draw effect. The Uno window continues regardless.
+
+**Events emitted.**
+- `CardPlayed { card: WildDrawFour }`
+- `WildDrawFourChallengeWindowOpened { challengedPlayerId, affectedPlayerId }`
+- `UnoChallengeWindowOpened { targetPlayerId }` (same player as `challengedPlayerId`)
+- Both windows proceed through their respective resolution paths (see sub-flows in doc 05).
+
+**Invariants that must hold.**
+- INV-G-25 (from section 3.1.3): Both windows are independent; resolution of one does not affect the other.
+- INV-CW3: At most one resolution per Uno challenge window instance.
+- INV-WDF1: At most one resolution per WDF challenge window instance.
+
+---
+
+### 6.7.10 WDF Challenge Concurrent with Affected Player's Acceptance
+
+**Description.** The affected next player submits a `ChallengeWildDrawFour` command at nearly the same instant as the WDF challenge window expires by timeout (or the player submits a `DrawCard` to accept the draw).
+
+**Root cause.** Network latency causes the challenge command to arrive at the server after the window has already closed.
+
+**Detection mechanism.** The Game aggregate checks `wdfChallengeWindow.status == Open` when processing the `ChallengeWildDrawFour` command. If the window has closed (by timeout or explicit acceptance), the challenge is rejected.
+
+**Domain behavior.** The server applies the same server-authoritative timing rule as for Uno challenges (A7): the server's clock determines window closure. If the challenge arrives after closure, it is rejected. No penalty is assessed to the affected player for submitting a late challenge — this is an expected race condition, not abuse.
+
+**Events emitted (challenge arrives after timeout).**
+- `WildDrawFourChallengeWindowClosed { reason: expired }`
+- `PenaltyCardsDrawn { playerId: affectedPlayerId, cardCount: 4, reason: wild_draw_four_card }`
+- `CommandRejected { commandId: challengeCommand.commandId, reason: WdfChallengeWindowClosed }`
+
+**Invariants that must hold.**
+- INV-WDF1: At most one resolution per WDF challenge window instance.
+- INV-WDF2: WDF Challenge Window closure is final and cannot be reopened by a late `ChallengeWildDrawFour`.
+
+---
+
+### 6.7.11 WDF Challenge Resolution and Hand Privacy
+
+**Description.** When a WDF challenge is resolved, the server must verify the challenged player's hand at the time of the WDF play. This raises a privacy question: what information is revealed to participants and spectators?
+
+**Root cause.** The challenged player's hand contents are private (INV-SV1, term 76). Revealing card identities during adjudication would violate the hand privacy invariant.
+
+**Detection mechanism.** N/A — this is a design policy, not a runtime detection scenario.
+
+**Domain behavior.** The server reveals only the minimum information necessary for adjudication transparency:
+- **Published to all (including spectators):** The `outcome` field (`bluff_confirmed` or `legitimate_play`) and the `challengedPlayerHadMatchingColor` boolean. These indicate whether the challenged player held a matching-color card but do not reveal which cards or how many.
+- **NOT revealed:** The actual card identities in the challenged player's hand snapshot. The snapshot is stored server-side for audit purposes only and is never transmitted to any client.
+- **Audit log:** The full hand snapshot is recorded in the audit log (AL context) for replay and dispute resolution purposes.
+
+**Events emitted.**
+- `WildDrawFourChallengeResolved` (spectator-safe version excludes `penaltyCards` field; includes `challengedPlayerHadMatchingColor` boolean).
+
+**Invariants that must hold.**
+- INV-SV1 (from doc 03): Private hand data is never included in the Spectator View.
+- INV-WDF3: The challenged player's hand snapshot is recorded in the audit log but never transmitted to clients. Only the boolean `challengedPlayerHadMatchingColor` is published.
+
 ---
 
 ## 6.8 Summary Table
@@ -1129,3 +1197,6 @@ All reshuffle seeds are recorded in the game log for replay and audit (A11).
 | 6.7.6 | Skip card with two players | Game mechanic | `playerCount == 2` + Skip card played | Skip player retains turn (equivalent to two turns) | `PlayerSkipped`, `TurnAdvanced` (back to Skip player) |
 | 6.7.7 | Reverse card in two-player game | Game mechanic | `playerCount == 2` + Reverse card played | Acts as Skip; playing player retains turn | `DirectionReversed`, `TurnAdvanced` (back to Reverse player) |
 | 6.7.8 | Tiebreak chain exhausted with no unique winner | Game mechanic | All three tiebreak criteria equal among tied players | All tied-qualifying players advanced; next round accommodates extra players | `TiebreakerExhausted`, `PlayerAdvanced`×N, `RoomOversizeAdjustment` |
+| 6.7.9 | WDF challenge coincides with Uno call window | Game mechanic | `card.type == WDF` and `handSize == 1` simultaneously | Both windows coexist independently; WDF resolved first (gates draw); Uno window unaffected | `WildDrawFourChallengeWindowOpened`, `UnoChallengeWindowOpened` |
+| 6.7.10 | WDF challenge concurrent with acceptance/timeout | Game mechanic | `wdfChallengeWindow.status` check on command arrival | Late challenge rejected; no penalty for race condition | `WildDrawFourChallengeWindowClosed`, `CommandRejected(WdfChallengeWindowClosed)` |
+| 6.7.11 | WDF challenge resolution and hand privacy | Game mechanic | Design policy (not runtime detection) | Only boolean outcome published; hand snapshot in audit log only | `WildDrawFourChallengeResolved` (spectator-safe: outcome + boolean only) |
