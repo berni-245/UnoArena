@@ -2,9 +2,7 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Created
-
-    Created --> Waiting : RoomCreated
+    [*] --> Waiting : RoomCreated
 
     Waiting --> Ready : MinimumPlayersMet (2+ players)
     Waiting --> InProgress : GameStarted (tournament auto-start)

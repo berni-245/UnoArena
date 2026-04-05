@@ -91,15 +91,15 @@ Both conditions must be true for the command to be accepted. The aggregate proce
 The target successfully calls Uno. The challenge window closes with reason `uno_called`. The subsequent `ChallengeUnoCall` arrives after the window is closed; it is rejected with `reason: ChallengeWindowClosed`. The challenger is penalized (two draw cards) for submitting a late challenge — no, wait: the challenger submitted within the window but lost the race. The domain rule (A7) is server-authoritative: since `CallUno` was processed first, the challenge window is already closed when `ChallengeUnoCall` is evaluated. No penalty is assessed to either player beyond the rejection of the challenge command. The challenger issued the command in good faith within what their client believed was the window; this is an expected race condition, not abuse.
 
 *If `ChallengeUnoCall` arrives first:*
-The challenge is processed. The aggregate checks: did the target call Uno before this challenge? No — `CallUno` has not been processed. Challenge succeeds. Target receives penalty cards (`UnoChallengeAccepted`, `PenaltyCardsDrawn`). Challenge window closes. The subsequent `CallUno` arrives after the window is closed; rejected with `reason: ChallengeWindowClosed`. No Uno call credit is given.
+The challenge is processed. The aggregate checks: did the target call Uno before this challenge? No — `CallUno` has not been processed. Challenge succeeds. Target receives penalty cards (`ChallengeResolved { outcome: target_penalized }`, `PenaltyCardsDrawn`). Challenge window closes. The subsequent `CallUno` arrives after the window is closed; rejected with `reason: ChallengeWindowClosed`. No Uno call credit is given.
 
 **Events emitted (`CallUno` first).**
-- `UnoCalledSuccessfully { gameId, playerId, challengeWindowId }`
+- `UnoCallMade { gameId, playerId, challengeWindowId }`
 - `ChallengeWindowClosed { reason: uno_called }`
 - `CommandRejected { commandId: challengeCommand.commandId, reason: ChallengeWindowClosed }`
 
 **Events emitted (`ChallengeUnoCall` first).**
-- `UnoChallengeAccepted { gameId, challengerId, targetPlayerId, challengeWindowId }`
+- `ChallengeResolved { gameId, challengerId, targetPlayerId, outcome: target_penalized, challengeWindowId }`
 - `PenaltyCardsDrawn { playerId: targetPlayerId, count: 2, reason: failed_uno_call }`
 - `ChallengeWindowClosed { reason: challenge_resolved }`
 - `CommandRejected { commandId: callUnoCommand.commandId, reason: ChallengeWindowClosed }`
@@ -121,7 +121,7 @@ The challenge is processed. The aggregate checks: did the target call Uno before
 **Domain behavior.** Only the first challenge received (by arrival order in the serialized command queue) is processed and resolved. All subsequent challenges are rejected with `reason: ChallengeWindowClosed`. No additional penalties are assessed for the redundant challenges.
 
 **Events emitted.**
-- `UnoChallengeAccepted` or `UnoChallengeRejected` (for the first challenger, depending on whether the target had already called Uno)
+- `ChallengeResolved` with `outcome: target_penalized` or `outcome: challenger_penalized` (for the first challenger, depending on whether the target had already called Uno)
 - `PenaltyCardsDrawn` (for whichever party loses the first challenge)
 - `ChallengeWindowClosed { reason: challenge_resolved }`
 - `CommandRejected { reason: ChallengeWindowClosed }` (for each subsequent challenger)
@@ -1083,7 +1083,7 @@ All reshuffle seeds are recorded in the game log for replay and audit (A11).
 | 6.1.1 | Two players simultaneously play a card | Concurrent conflict | Sequence number + active player check on Game aggregate | First arrival wins; second rejected | `CardPlayed`, `CommandRejected(NotYourTurn)` |
 | 6.1.2a | Next player plays while challenge window open | Concurrent conflict | `challengeWindowOpen` flag + turn ownership check | Window atomically closed, then play processed | `ChallengeWindowClosed(next_player_acted)`, `CardPlayed` |
 | 6.1.2b | Non-next player plays while challenge window open | Concurrent conflict | Turn ownership check | Rejected; window unaffected | `CommandRejected(NotYourTurn)` |
-| 6.1.3 | Concurrent Uno call and challenge | Concurrent conflict | Aggregate serialization; first arrival wins | Winner determined by processing order; loser rejected | `UnoCalledSuccessfully` or `UnoChallengeAccepted`, `ChallengeWindowClosed`, `CommandRejected` |
+| 6.1.3 | Concurrent Uno call and challenge | Concurrent conflict | Aggregate serialization; first arrival wins | Winner determined by processing order; loser rejected | `UnoCallMade` or `ChallengeResolved(outcome)`, `ChallengeWindowClosed`, `CommandRejected` |
 | 6.1.4 | Multiple simultaneous challenges | Concurrent conflict | `challengeWindowOpen` flag | Only first challenge resolved; others rejected | `ChallengeResolved`, `ChallengeWindowClosed`, `CommandRejected(ChallengeWindowClosed)` |
 | 6.1.5 | Command during reconnection window (before handshake) | Concurrent conflict | Player `connectionStatus` check | Rejected; reconnection window continues | `CommandRejected(PlayerDisconnected)` |
 | 6.1.6 | Race: reconnect vs. auto-forfeit timer | Concurrent conflict | Aggregate serialization; `reconnectionWindowExpiry` check | First-processed determines outcome; irreversible | `PlayerReconnected` or `PlayerForfeited`, `CommandRejected(ReconnectionWindowExpired)` |

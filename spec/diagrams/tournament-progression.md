@@ -21,7 +21,7 @@ stateDiagram-v2
         }
 
         Round1 --> EvaluatingAdvancement : RoundCompleted
-        EvaluatingAdvancement --> Round1 : playersRemaining > 10 (next round)
+        EvaluatingAdvancement --> RoundN : playersRemaining > 10 (create next round, N+1)
         EvaluatingAdvancement --> Finals : playersRemaining <= 10
     }
 

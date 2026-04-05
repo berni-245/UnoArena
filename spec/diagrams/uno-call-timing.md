@@ -3,7 +3,7 @@
 ```mermaid
 sequenceDiagram
     participant Player as Player<br/>(playing penultimate card)
-    participant Server as Server<br/>(RoomAggregate)
+    participant Server as Server<br/>(GameAggregate)
     participant Timer as Timer (5s)
     participant Opponent as Opponent
     participant NextPlayer as NextPlayer
@@ -20,11 +20,11 @@ sequenceDiagram
 
         Opponent->>Server: ChallengeUnoCall(targetPlayer)
         Server->>Server: Resolve: Player DID call Uno
-        Server->>Server: UnoChallengeResolved(outcome: failed)
+        Server->>Server: ChallengeResolved(outcome: challenger_penalized)
         Server-->>Opponent: Penalty: draw 2 cards (false challenge)
         Server-->>Player: Notify: challenge failed, no penalty
-
-        Timer-->>Server: ChallengeWindowClosed
+        Server->>Timer: Cancel timer (challenge resolved)
+        Timer-->>Server: ChallengeWindowClosed(reason: challenge_resolved)
         deactivate Timer
 
     else Scenario 2 - Missed Uno Call (challenge succeeds)
@@ -39,11 +39,11 @@ sequenceDiagram
 
         Opponent->>Server: ChallengeUnoCall(targetPlayer)
         Server->>Server: Resolve: Player did NOT call Uno
-        Server->>Server: UnoChallengeResolved(outcome: success)
+        Server->>Server: ChallengeResolved(outcome: target_penalized)
         Server-->>Player: Penalty: draw 2 cards (missed Uno call)
         Server-->>Opponent: Notify: challenge succeeded
-
-        Timer-->>Server: ChallengeWindowClosed
+        Server->>Timer: Cancel timer (challenge resolved)
+        Timer-->>Server: ChallengeWindowClosed(reason: challenge_resolved)
         deactivate Timer
 
     else Scenario 3 - Missed Uno Call, No Challenge (window expires)

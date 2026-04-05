@@ -408,11 +408,11 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
-#### StartGame
+#### StartMatch
 
 | Field | Value |
 |-------|-------|
-| **Command Name** | `StartGame` |
+| **Command Name** | `StartMatch` |
 | **Context** | Room Gameplay (RG) |
 | **Issuer** | Player (host) |
 | **Target Aggregate** | `Room` |
@@ -428,7 +428,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 **Preconditions:**
 1. Player has a valid, active session.
-2. Room status is `waiting`.
+2. Room status is `waiting` or `ready`.
 3. Issuer is the room host (or the room was filled, triggering auto-start).
 4. At least 2 players are present in the room.
 
@@ -626,7 +626,6 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 **Resulting Events (happy path):**
 - `UnoCallMade` with `gameId`, `playerId`, `timestamp`.
-- `UnoCalledSuccessfully` with `gameId`, `playerId`, `timestamp`.
 
 **Rejection Reasons:**
 | Reason Code | HTTP Status | Description |
@@ -637,7 +636,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 | `wrong_player` | 403 | The calling player is not the player for whom the window is open |
 
 **Idempotency Behavior:**
-- Replaying with the same `commandId` returns the cached `UnoCalledSuccessfully` response.
+- Replaying with the same `commandId` returns the cached `UnoCallMade` response.
 
 ---
 
@@ -669,13 +668,13 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 **Resulting Events (happy path):**
 - `ChallengeMade` with `gameId`, `challengerId`, `targetPlayerId`.
-- If `targetPlayerId` had already called Uno (`UnoCalledSuccessfully` preceded this challenge):
-  - `UnoChallengeRejected` with `gameId`, `challengerId`, `targetPlayerId`.
+- If `targetPlayerId` had already called Uno (`UnoCallMade` preceded this challenge):
+  - `ChallengeResolved` with `outcome = challenger_penalized`.
   - `PenaltyCardsDrawn` for the challenger (2 cards, `reason = failed_uno_challenge`).
 - If `targetPlayerId` had NOT called Uno:
-  - `UnoChallengeAccepted` with `gameId`, `challengerId`, `targetPlayerId`.
+  - `ChallengeResolved` with `outcome = target_penalized`.
   - `PenaltyCardsDrawn` for the target (2 cards, `reason = missed_uno_call`).
-- In both cases: `ChallengeResolved`, then `ChallengeWindowClosed`.
+- In both cases: `ChallengeWindowClosed`.
 
 **Rejection Reasons:**
 | Reason Code | HTTP Status | Description |
@@ -1730,7 +1729,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 **Consumers and Reactions:**
 | Consumer | Reaction |
 |----------|----------|
-| Room Gameplay (internal) | For tournament rooms: auto-trigger `StartGame`. For casual rooms: host must issue `StartGame`. |
+| Room Gameplay (internal) | For tournament rooms: auto-trigger `StartMatch`. For casual rooms: host must issue `StartMatch`. |
 | Spectator View | Mark room as full in lobby. |
 
 ---
@@ -1741,7 +1740,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 |-------|-------|
 | **Event Name** | `GameStartRequested` |
 | **Context** | RG (internal) |
-| **Triggering Command** | `StartGame` |
+| **Triggering Command** | `StartMatch` |
 | **Aggregate** | `Room` |
 
 **Key Payload Fields:**
@@ -2224,71 +2223,6 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 | Audit & Game Log | Append. |
 
 ---
-
-#### UnoCalledSuccessfully
-
-| Field | Value |
-|-------|-------|
-| **Event Name** | `UnoCalledSuccessfully` |
-| **Context** | RG (internal / semi-public) |
-| **Triggering Command** | `CallUno` (when the window is open and the player is eligible) |
-| **Aggregate** | `Game` |
-
-**Key Payload Fields:**
-```
-{
-  gameId    : UUID
-  playerId  : UUID
-  calledAt  : ISO-8601
-}
-```
-
-**Consumers and Reactions:**
-| Consumer | Reaction |
-|----------|----------|
-| Audit & Game Log | Append for challenge adjudication record. |
-
----
-
-#### UnoChallengeRejected
-
-| Field | Value |
-|-------|-------|
-| **Event Name** | `UnoChallengeRejected` |
-| **Context** | RG |
-| **Triggering Policy** | Challenge adjudication: target had already called Uno |
-| **Aggregate** | `Game` |
-
-**Key Payload Fields:**
-```
-{
-  gameId         : UUID
-  challengerId   : UUID
-  targetPlayerId : UUID
-  rejectedAt     : ISO-8601
-}
-```
-
----
-
-#### UnoChallengeAccepted
-
-| Field | Value |
-|-------|-------|
-| **Event Name** | `UnoChallengeAccepted` |
-| **Context** | RG |
-| **Triggering Policy** | Challenge adjudication: target had NOT called Uno |
-| **Aggregate** | `Game` |
-
-**Key Payload Fields:**
-```
-{
-  gameId         : UUID
-  challengerId   : UUID
-  targetPlayerId : UUID
-  acceptedAt     : ISO-8601
-}
-```
 
 ---
 
@@ -3649,10 +3583,8 @@ PlayCard [Player]
         → UnoChallengeWindowOpened (5s window)
           → Path A: CallUno [Player] within window
               → UnoCallMade
-              → UnoCalledSuccessfully
-              → [if opponent issues ChallengeUnoCall]
+              → [if opponent issues ChallengeUnoCall after UnoCallMade]
                   → ChallengeMade
-                  → UnoChallengeRejected (challenge fails; Uno was called)
                   → ChallengeResolved (outcome: challenger_penalized)
                   → PenaltyCardsDrawn (challenger, 2 cards)
                   → UnoChallengeWindowClosed (reason: challenge_resolved)
@@ -3660,7 +3592,6 @@ PlayCard [Player]
                   → UnoChallengeWindowClosed (reason: expired | next_player_acted)
           → Path B: ChallengeUnoCall [Opponent] before CallUno
               → ChallengeMade
-              → UnoChallengeAccepted (challenge succeeds; Uno not called)
               → ChallengeResolved (outcome: target_penalized)
               → PenaltyCardsDrawn (target player, 2 cards)
               → UnoChallengeWindowClosed (reason: challenge_resolved)

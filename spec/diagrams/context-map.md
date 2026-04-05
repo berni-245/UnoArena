@@ -11,6 +11,8 @@ graph LR
 
     ID -->|"U/D, OHS"| RG
     ID -->|"U/D, OHS"| TO
+    ID -->|"U/D, OHS"| RS
+    ID -->|"U/D, Conformist"| AL
 
     RG -->|"U/D, Published Language"| TO
     RG -->|"U/D, Published Language"| RS
@@ -21,4 +23,6 @@ graph LR
     TO -->|"U/D, Conformist"| AL
 
     RS -->|"U/D, Conformist"| AL
+
+    SV -->|"U/D, Conformist"| AL
 ```

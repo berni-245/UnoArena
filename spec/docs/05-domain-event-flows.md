@@ -60,12 +60,12 @@ This flow covers the complete lifecycle of a casual ad-hoc room, from its creati
 **7.** Repeat step 4--6 until the host decides to start or the room fills.
 
 **8.** The host issues:
-- `StartGame` (requires at least 2 players in the room).
+- `StartMatch` (requires at least 2 players in the room).
 
 **9.** The Room aggregate validates the start conditions:
 - Issuer is the host.
 - At least 2 players are present.
-- Room status is `waiting`.
+- Room status is `waiting` or `ready`.
 - If validation fails: command rejected.
 - If validation passes: `GameStartRequested` with `roomId`, `matchNumber = 1`, `gameNumber = 1`.
 
@@ -184,7 +184,7 @@ This phase repeats for every turn until a player empties their hand or the game 
 **29.** **Path A -- Player calls Uno in time:**
 - The target player issues `CallUno` with `gameId`, `playerId`.
 - This command may be issued concurrently with `PlayCard` (i.e., the player may include the Uno call at the same time as playing their penultimate card, or issue it as a separate command within the window).
-- `UnoCalledSuccessfully` with `gameId`, `playerId`, `timestamp`.
+- `UnoCallMade` with `gameId`, `playerId`, `timestamp`.
 
 **30.** **Path B -- Opponent challenges the Uno call:**
 - Any opponent issues `ChallengeUnoCall` with `gameId`, `challengerId`, `targetPlayerId`.
@@ -193,13 +193,13 @@ This phase repeats for every turn until a player empties their hand or the game 
 **31.** Challenge resolution:
 - **If the target player DID call Uno (step 29 occurred before the challenge):**
     - The challenge fails. The challenger is penalized.
-    - `UnoChallengeRejected` with `gameId`, `challengerId`, `targetPlayerId`.
+    - `ChallengeResolved` with `outcome = challenger_penalized`.
     - **Policy: PenalizeFailedChallenger** -- the challenger draws 2 penalty cards.
     - `PenaltyCardsDrawn` with `playerId = challengerId`, `cardCount = 2`, `reason = failed_uno_challenge`.
 
 - **If the target player did NOT call Uno (step 29 has not occurred):**
     - The challenge succeeds. The target is penalized.
-    - `UnoChallengeAccepted` with `gameId`, `challengerId`, `targetPlayerId`.
+    - `ChallengeResolved` with `outcome = target_penalized`.
     - **Policy: PenalizeUncalledUno** -- the target player draws 2 penalty cards.
     - `PenaltyCardsDrawn` with `playerId = targetPlayerId`, `cardCount = 2`, `reason = missed_uno_call`.
     - The target player now has 3 cards (1 remaining + 2 penalty).

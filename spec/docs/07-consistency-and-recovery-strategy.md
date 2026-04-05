@@ -57,7 +57,7 @@ The Room aggregate manages the container lifecycle that wraps Matches and Games.
 **What is strongly consistent:**
 - Room status transitions: `waiting` → `in_progress` → `completed`. A room cannot be observed in two states simultaneously.
 - Player slot management: join, leave, and forfeit are atomic. The current player count is always exact. No room can exceed `maxPlayers` (V1).
-- Match start validation: the minimum player count (A17) is checked atomically when `StartGame` is processed. If two concurrent `StartGame` commands arrive (e.g., two rapid retries from the host), only one succeeds; the second is deduplicated or rejected.
+- Match start validation: the minimum player count (A17) is checked atomically when `StartMatch` is processed. If two concurrent `StartMatch` commands arrive (e.g., two rapid retries from the host), only one succeeds; the second is deduplicated or rejected.
 - Assignment of a `tournamentId` and `roundId` when created from a `TournamentRoomAssigned` event: this binding is immutable once set.
 
 **Why strong consistency is required here:** Room membership is the basis for dealing hands and determining turn order. A race condition on join/leave could result in a player being dealt into a game they were not present for, or a player being excluded from a game while still counted. Either scenario violates the basic fairness invariant.
@@ -331,7 +331,7 @@ Within a single Room, the Match lifecycle is a mini-saga that is entirely within
 
 **Saga steps:**
 ```
-[StartGame command received, game count = 1]
+[StartMatch command received, game count = 1]
         |
         v
   [Game 1: GameStarted → gameplay → GameCompleted]
@@ -517,7 +517,7 @@ These invariants are enforced within a single aggregate on every command, before
 | The challenge window may only be in one state at a time | Game | State machine: `CLOSED → OPEN → (CHALLENGED → RESOLVED | EXPIRED)`. Only valid transitions allowed. A challenge can only be issued in `OPEN` state. |
 | A challenge can only be made during the open challenge window, before the next player acts | Game | Challenge command rejected if `challengeWindowStatus != OPEN`. Per A8: if the next player's turn is already being processed, the challenge window is closed first; the challenge arrives too late. |
 | The Uno call challenge window timing is server-authoritative | Game | Server clock starts the 5-second timer at `UnoChallengeWindowOpened` event time (A7). Client-reported time is not accepted. |
-| A room in `waiting` state may not start a match until minimum player count (2) is reached | Room | `room.playerCount >= 2` checked on `StartGame` command. |
+| A room in `waiting` or `ready` state may not start a match until minimum player count (2) is reached | Room | `room.playerCount >= 2` checked on `StartMatch` command. |
 | A room may not accept new players if not in `waiting` state | Room | `room.status == waiting` checked on `JoinRoom`. |
 | A match has at most 3 games | Match (within Room) | `match.gameCount < 3` checked before starting a new game. `MatchCompleted` is emitted when the 3rd game completes (or when the outcome is determined, per Q2 working assumption). |
 | Single active session per player | Session (IS) | Atomic compare-and-swap on session creation: read current active session; if exists, invalidate it atomically before creating the new one. |
@@ -710,7 +710,7 @@ The following table provides a consolidated reference of the consistency model a
 | Card play, draw, Uno call, challenge | Strong (within Game aggregate) | Sequence numbers, single-writer, synchronous invariant check | 7.1.1.1 |
 | Turn timer expiry → auto-draw/auto-pass | Strong (within Game aggregate) | Server-initiated internal command, appended to Game Log | 7.4.1 |
 | Room state transitions | Strong (within Room aggregate) | Single-writer, synchronous lifecycle check | 7.1.1.2 |
-| Match game count tracking | Strong (within Room aggregate) | Synchronous count check before `StartGame` | 7.1.1.3 |
+| Match game count tracking | Strong (within Room aggregate) | Synchronous count check before `StartMatch` | 7.1.1.3 |
 | Session creation / invalidation | Strong (within Session aggregate) | Atomic compare-and-swap | 7.1.1.4 |
 | Tournament round completion counter | Strong (within Tournament Round aggregate) | Atomic increment, idempotent by roomId | 7.1.1.5 |
 | Elo update after casual game | Eventual | At-least-once delivery + idempotency store (gameId per player) | 7.2.2, 7.3.5 |

@@ -20,8 +20,8 @@ sequenceDiagram
     RG-->>AL: PlayerJoinedRoom (×N)
     RG-->>SV: [room visible in lobby]
 
-    Host->>RG: StartGame {roomId}
-    RG->>RG: Validate: ≥2 players, status=waiting, issuer=host
+    Host->>RG: StartMatch {roomId}
+    RG->>RG: Validate: ≥2 players, status=waiting or ready, issuer=host
 
     %% === GAME 1 ===
     RG->>RG: InitializeDeck (server-side RNG, seed recorded)
@@ -40,7 +40,7 @@ sequenceDiagram
         opt Player plays penultimate card
             RG-->>AL: ChallengeWindowOpened (5s timer)
             alt UnoCallMade in time
-                RG-->>AL: UnoCalledSuccessfully
+                RG-->>AL: UnoCallMade
             else ChallengeUnoCall received
                 RG-->>AL: ChallengeResolved {penalizedPlayerId}
             else Window expires

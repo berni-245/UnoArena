@@ -71,6 +71,20 @@ flowchart LR
 | **Penalty card identities** | **PRIVATE** | Added to hand → private |
 | **Sequence numbers** | **Private** (implementation) | Internal concurrency control; not spectator-relevant |
 
+## Coverage Note
+
+The flowchart above is **illustrative, not exhaustive**. Additional transformations defined in Section 2.1.5.2 include:
+
+| Source Event | Spectator Event |
+|---|---|
+| `DirectionReversed` | `SpectatorDirectionReversed` (pass-through) |
+| `PlayerSkipped` | `SpectatorPlayerSkipped` (pass-through) |
+| `ColorChosen` | `SpectatorColorChosen` (pass-through) |
+| `PlayerReconnected` | `SpectatorPlayerReconnected` (pass-through) |
+| `MatchCompleted` | `SpectatorMatchCompleted` (match score update) |
+
+---
+
 ## ACL Ownership
 
 The ACL is owned by the **Spectator View context**, not by Room Gameplay. Room Gameplay publishes its full, unfiltered event stream. The Spectator View's ACL is responsible for all privacy enforcement. Room Gameplay has no knowledge of or responsibility for spectator concerns.

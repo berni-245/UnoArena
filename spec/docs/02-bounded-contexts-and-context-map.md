@@ -50,7 +50,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 
 | Aggregate | Description |
 |-----------|-------------|
-| **Room** | The top-level lifecycle container. Transitions through `waiting` -> `in_progress` -> `completed`. Holds room configuration (casual vs. tournament, player capacity, best-of-3 match structure). |
+| **Room** | The top-level lifecycle container. Transitions through `waiting` → `ready` → `in_progress` → (`completed` \| `abandoned`). Holds room configuration (casual vs. tournament, player capacity, best-of-3 match structure). |
 | **Match** | A best-of-three series between the players in a room. Tracks game wins per player, cumulative card-point totals for tiebreaking, and match outcome. |
 | **Game** | A single Uno game. The primary aggregate for gameplay. Owns the deck, discard pile, player hands, turn order, direction, current player, game phase, sequence number for concurrency control, and the Uno call/challenge window state. |
 | **Player Hand** | The set of cards held by a player within a game. Owned by the Game aggregate. |
@@ -78,6 +78,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `PlayerJoinedRoom` | A player has joined a room in `waiting` state. |
 | `PlayerLeftRoom` | A player has left a room in `waiting` state. |
 | `RoomFilled` | Room has reached its configured player capacity. |
+| `GameStartRequested` | Internal event. The host (or system for tournament rooms) has issued `StartMatch`; the deck initialization pipeline is now triggered. |
 | `GameStarted` | A new game within a match has begun. Deck shuffled, hands dealt. |
 | `CardPlayed` | A player played a card. Includes card identity, player, and resulting game state changes. |
 | `CardDrawn` | A player drew a card from the deck. Includes card identity (private to consuming contexts that need it). |
@@ -88,12 +89,14 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `UnoCallMade` | A player called "Uno!" after playing their second-to-last card. |
 | `UnoChallengeWindowOpened` | The 5-second challenge window has begun. |
 | `ChallengeMade` | An opponent challenged a player's Uno call (or lack thereof). |
-| `ChallengeResolved` | A challenge has been adjudicated. Includes outcome: challenger penalized or challenged player penalized. |
+| `ChallengeResolved` | A challenge has been adjudicated. Includes `outcome` field: `challenger_penalized` (Uno was called) or `target_penalized` (Uno was not called). |
+| `PenaltyCardsDrawn` | A player drew penalty cards as a result of a challenge resolution. Includes player, card count, and reason. |
 | `UnoChallengeWindowClosed` | The challenge window has expired without a challenge. |
 | `PlayerDisconnected` | A player's connection has been lost; reconnection timer started. |
 | `PlayerReconnected` | A player has reconnected within the 60-second window. |
 | `PlayerForfeited` | A player has forfeited (disconnection timeout or explicit forfeit). |
 | `GameCompleted` | A single game has ended. Includes final placement order and card-point totals. |
+| `MatchGameCompleted` | Emitted between games within a match (after Game 1 or Game 2) when the match has not yet been decided. Carries the current game number and the next game number. |
 | `MatchCompleted` | A best-of-three match has concluded. Includes match winner and per-game results. |
 | `RoomCompleted` | All matches in the room are finished. Includes final room results. |
 
