@@ -18,7 +18,7 @@ sequenceDiagram
 
     P2->>RG: JoinRoom {roomId} (repeated per player)
     RG-->>AL: PlayerJoinedRoom (×N)
-    RG-->>SV: [room visible in lobby]
+    RG-->>AvailableRoomsReadModel: RoomCreated [room visible in lobby]
 
     Host->>RG: StartMatch {roomId}
     RG->>RG: Validate: ≥2 players, status=waiting or ready, issuer=host

@@ -208,6 +208,9 @@ Whether casual or tournament, a player can participate in only one room at any g
 **A38: Turn timer exists for connected players.**
 Although the specification defines disconnection timeouts (V9), it does not mention a per-turn timer for connected players. We assume a turn timer exists to prevent griefing by stalling: 30 seconds for casual rooms, 60 seconds for tournament rooms. If the timer expires, the server auto-draws (if the player has not yet drawn) and auto-passes. **See Q4 for discussion.**
 
+**A39: Off-turn reconnection window expiry results in deferred forfeit.**
+V18 states that an automatic forfeit is issued if the reconnection window expires *during the player's turn*. The specification is silent on what happens when the 60-second window expires while the disconnected player is not the active player. We assume: the player is marked Inactive when the window expires, and the forfeit is issued when their turn next arrives in the rotation. This is consistent with V9 ("considered inactive" after 60 seconds) and ensures no game-blocking delay while preserving the fairness of a full-turn cycle before elimination.
+
 ---
 
 ## 8.3 Open Questions (Genuine Ambiguities Requiring Stakeholder Clarification)

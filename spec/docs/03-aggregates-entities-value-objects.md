@@ -31,9 +31,9 @@ Waiting --> Ready --> InProgress --> Completed
 
 | State | Meaning | Entry Condition | Exit Condition |
 |-------|---------|-----------------|----------------|
-| `Waiting` | Room is open; players may join or leave. No active Match or Game. | Room creation. | `StartMatch` command accepted (host issues, minimum players met). |
-| `Ready` | Minimum player count is satisfied; host has confirmed start. | `StartMatch` command accepted. | First `GameStarted` event emitted for Game 1. |
-| `InProgress` | At least one Game in the Match is underway or has been played. Room is locked to new entrants. | First Game begins. | Match conclusion (Match winner determined or Abandoned condition met). |
+| `Waiting` | Room is open; players may join or leave. No active Match or Game. | Room creation. | Minimum player count is met. |
+| `Ready` | Minimum player count is satisfied; host may now issue `StartMatch`. | Minimum player count is met. | `StartMatch` command accepted; or player count drops below minimum (→ back to `Waiting`). |
+| `InProgress` | At least one Game in the Match is underway or has been played. Room is locked to new entrants. | First `GameStarted` event emitted for Game 1. | Match conclusion (Match winner determined or Abandoned condition met). |
 | `Completed` | Terminal state. The Match has concluded with a valid outcome. Results have been emitted. | Match completed with at least one valid Game. | None (terminal). |
 | `Abandoned` | Terminal state. All remaining players forfeited before a Match winner was determined. No Elo updates are issued. | All active PlayerSlots reach forfeited status simultaneously. | None (terminal). |
 

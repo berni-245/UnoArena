@@ -78,8 +78,9 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `PlayerJoinedRoom` | A player has joined a room in `waiting` state. |
 | `PlayerLeftRoom` | A player has left a room in `waiting` state. |
 | `RoomFilled` | Room has reached its configured player capacity. |
-| `GameStartRequested` | Internal event. The host (or system for tournament rooms) has issued `StartMatch`; the deck initialization pipeline is now triggered. |
 | `GameStarted` | A new game within a match has begun. Deck shuffled, hands dealt. |
+
+> **Internal policy trigger (does not cross context boundary):** `GameStartRequested` — emitted within the RG context when `StartMatch` is accepted; triggers the deck initialization pipeline. Not published to external consumers.
 | `CardPlayed` | A player played a card. Includes card identity, player, and resulting game state changes. |
 | `CardDrawn` | A player drew a card from the deck. Includes card identity (private to consuming contexts that need it). |
 | `TurnAdvanced` | The turn has moved to the next player. |

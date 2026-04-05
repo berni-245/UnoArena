@@ -5,7 +5,7 @@ stateDiagram-v2
     [*] --> Waiting : RoomCreated
 
     Waiting --> Ready : MinimumPlayersMet (2+ players)
-    Waiting --> InProgress : GameStarted (tournament auto-start)
+    %% Tournament rooms follow the same path: auto-join triggers MinimumPlayersMet → Ready, then auto-StartMatch → InProgress
 
     Ready --> Waiting : PlayerLeft (below minimum)
     Ready --> InProgress : GameStarted
@@ -18,10 +18,6 @@ stateDiagram-v2
 
     InProgress --> Completed : MatchCompleted
     InProgress --> Abandoned : AllPlayersForfeited
-
-    Waiting --> Completed : ForceCompleted (admin/timeout)
-    Ready --> Completed : ForceCompleted (admin/timeout)
-    InProgress --> Completed : ForceCompleted (admin/timeout)
 
     Completed --> [*]
     Abandoned --> [*]

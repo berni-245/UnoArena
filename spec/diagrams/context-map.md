@@ -14,8 +14,8 @@ graph LR
     ID -->|"U/D, OHS"| RS
     ID -->|"U/D, Conformist"| AL
 
-    RG -->|"U/D, Published Language"| TO
-    RG -->|"U/D, Published Language"| RS
+    RG -->|"U/D, Conformist"| TO
+    RG -->|"U/D, Conformist"| RS
     RG -->|"U/D, ACL - privacy filter"| SV
     RG -->|"U/D, Conformist"| AL
 
