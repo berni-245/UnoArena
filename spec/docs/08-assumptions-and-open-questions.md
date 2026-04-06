@@ -133,8 +133,8 @@ If a tournament round's math produces a room with fewer than 2 players (e.g., ex
 
 ### 8.2.5 Scoring and Rating
 
-**A24: Elo K-factor is 32 for all players.**
-We use a standard K-factor of 32 for Elo calculations. A variable K-factor (e.g., lower K for experienced players) is a valid refinement but is not specified and adds complexity without clear domain justification at this stage.
+**A24: Elo K-factor is variable based on games played.**
+We use a variable K-factor schedule to allow new players' ratings to converge quickly while keeping experienced players' ratings stable: K=40 for players with fewer than 30 completed games, K=20 for 30–100 games, and K=10 for more than 100 games. This follows standard competitive Elo practice.
 
 **A25: Multi-player Elo uses average pairwise results.**
 In a game with N players, each player's Elo delta is computed as the average of N-1 pairwise expected-vs-actual comparisons against every other player in the room. This is a standard extension of Elo to multiplayer settings, treating the multi-player game as a collection of pairwise matchups.
@@ -209,7 +209,17 @@ Whether casual or tournament, a player can participate in only one room at any g
 Although the specification defines disconnection timeouts (V9), it does not mention a per-turn timer for connected players. We assume a turn timer exists to prevent griefing by stalling: 30 seconds for casual rooms, 60 seconds for tournament rooms. If the timer expires, the server auto-draws (if the player has not yet drawn) and auto-passes. **See Q4 for discussion.**
 
 **A39: Off-turn reconnection window expiry results in deferred forfeit.**
+
 V18 states that an automatic forfeit is issued if the reconnection window expires *during the player's turn*. The specification is silent on what happens when the 60-second window expires while the disconnected player is not the active player. We assume: the player is marked Inactive when the window expires, and the forfeit is issued when their turn next arrives in the rotation. This is consistent with V9 ("considered inactive" after 60 seconds) and ensures no game-blocking delay while preserving the fairness of a full-turn cycle before elimination.
+
+**A40: Auto-skip for disconnected players does not involve drawing a card.**
+The specification says "the disconnected player's turn is skipped (as if they passed)." In standard Uno, passing requires drawing first. However, auto-skip does NOT auto-draw a card for the disconnected player. Rationale: drawing alters the player's hand without their consent and creates unfair card distribution. The "as if they passed" language is interpreted as "their turn is forfeited without action," not as a literal Uno Pass (which involves drawing). This is consistent with the glossary (term 62: "Auto-Skip is mechanically similar to a Pass but is system-initiated, not player-initiated").
+
+**A41: Tournament rooms must have at least 4 players.**
+The seeding algorithm for tournament rounds enforces a minimum of 4 players per room. This ensures at least one player is eliminated per room (since only the top 3 advance). If the remaining player count after a round would produce rooms with fewer than 4 players, the seeding algorithm merges players into fewer, larger rooms. The degenerate case of a single remaining player auto-advancing (A23) still applies.
+
+**A42: Tournament Placement Rating (TPR) is deferred to a future iteration.**
+The domain model acknowledges TPR as a separate rating metric (glossary term 51, A28). However, the exact formula, update triggers, and consistency strategy are not specified in this iteration. The `TournamentPlacementRatingUpdated` event is defined as a placeholder. The TPR calculation will be designed when stakeholders clarify expectations for tournament ranking granularity.
 
 ---
 

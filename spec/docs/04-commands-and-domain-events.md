@@ -2645,6 +2645,36 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
+#### BetweenRoundReconnectionWindowStarted
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `BetweenRoundReconnectionWindowStarted` |
+| **Context** | TO |
+| **Triggering Policy** | Player assigned to next tournament round is disconnected at the time of `TournamentRoomAssigned` |
+| **Aggregate** | `TournamentRound` |
+
+**Key Payload Fields:**
+```
+{
+  tournamentId : UUID
+  roundId      : UUID
+  roomId       : UUID
+  playerId     : UUID
+  expiresAt    : ISO-8601   // 60 seconds from room-ready
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Room Gameplay | Hold the player's slot; begin auto-join countdown. If the player reconnects within the window, issue `AutoJoinTournamentRoom`. |
+| Audit & Game Log | Append. |
+
+**Complementary event:** If the window expires without reconnection, `PlayerForfeited` is emitted with `reason = failed_to_join_tournament_room`, followed by `PlayerEliminated` in TO.
+
+---
+
 #### PlayerReconnected
 
 | Field | Value |
@@ -2701,7 +2731,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 - `session_invalidated`: A `SessionInvalidated` event triggered the disconnect-then-forfeit chain.
 - `turn_timer_expired`: In an extreme edge case, a player's turn timer expired repeatedly and the system auto-forfeits (if configured).
 
-**Note on card removal:** A forfeited player's cards are **removed entirely** from the game. They are NOT reshuffled back into the draw pile. This is an explicit domain rule.
+**Note on card removal:** A forfeited player's cards are **removed entirely** from the game. They are NOT reshuffled back into the draw pile. This is an explicit domain rule (A36). The card removal is captured by a `HandRemoved` event emitted immediately after `PlayerForfeited`.
 
 **Consumers and Reactions:**
 | Consumer | Reaction |
@@ -2713,6 +2743,62 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 **Idempotency Notes:**
 - Consumers must deduplicate by `(playerId, gameId)`. A double `PlayerForfeited` for the same player in the same game would corrupt tournament elimination state. See Section 4.5.
+
+---
+
+#### HandRemoved
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `HandRemoved` |
+| **Context** | RG |
+| **Triggering Policy** | Emitted immediately after `PlayerForfeited` to capture card removal from the game |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId           : UUID
+  playerId         : UUID
+  removedCardCount : uint8     // Number of cards removed
+  removedAt        : ISO-8601
+}
+```
+
+**Note:** Card identities are NOT included in this event. They are recorded only in the Audit & Game Log for replay purposes.
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Update card count for the removed player to 0. |
+| Audit & Game Log | Append (full card identities included in the AL-specific payload). |
+
+---
+
+#### DrawSkipped
+
+| Field | Value |
+|-------|-------|
+| **Event Name** | `DrawSkipped` |
+| **Context** | RG |
+| **Triggering Policy** | `DrawCard` command issued but both draw pile and discard pile are exhausted (no cards available to draw or reshuffle) |
+| **Aggregate** | `Game` |
+
+**Key Payload Fields:**
+```
+{
+  gameId    : UUID
+  playerId  : UUID
+  reason    : "no_cards_available"
+  skippedAt : ISO-8601
+}
+```
+
+**Consumers and Reactions:**
+| Consumer | Reaction |
+|----------|----------|
+| Spectator View | Display draw-skipped indicator. |
+| Audit & Game Log | Append. |
 
 ---
 
@@ -2802,7 +2888,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 |-------|-------|
 | **Event Name** | `MatchCompleted` |
 | **Context** | RG |
-| **Triggering Policy** | `CheckMatchProgress` policy after `GameCompleted` (a player has 2 wins) |
+| **Triggering Policy** | `CheckMatchProgress` policy after `GameCompleted` (see INV-M-04: 2-player rooms end when a player has 2 wins; multi-player rooms play all 3 games unless top-3 advancement is mathematically determined) |
 | **Aggregate** | `Match` |
 
 **Key Payload Fields:**
@@ -2812,11 +2898,11 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
   roomId                   : UUID
   tournamentId             : UUID | null
   roundId                  : UUID | null
-  matchWinnerId            : UUID
+  matchWinnerId            : UUID | null   // Set in 2-player rooms (first to 2 wins) or when a single player survives. Null in multi-player rooms; use matchPlacements for rankings (INV-M-08).
   matchPlacements          : [
     {
       playerId    : UUID
-      position    : uint8      // 1 = match winner, N = last
+      position    : uint8      // 1 = highest-ranked, N = last
       matchWins   : uint8      // Games won in this match
       cumulativeCardPoints : uint32    // Total card points across all games in match
     }
@@ -4029,8 +4115,8 @@ This section specifies the exact data that must cross each context boundary, and
 | `GameCompleted` | RG | TO | `gameId`, `roomId`, `tournamentId`, `roundId`, `roomType`, `wasAbandoned`, `placements[].{playerId, position}`, `completedAt` | TO does not need `cardPoints` (that is a RK concern). Hand contents must be absent. |
 | `GameCompleted` | RG | SV | `gameId`, `roomId`, `placements[].{playerId, position}`, `completedAt` | **Card identities of any remaining hand cards MUST be stripped by the SV ACL.** Final positions are public; the specific cards held are not. |
 | `GameCompleted` | RG | AL | All fields (full event including `cardPointTotals`, signed payload) | AL receives the complete, unfiltered event. This is the only context with full game state access. |
-| `MatchCompleted` | RG | TO | `matchId`, `roomId`, `tournamentId`, `roundId`, `matchWinnerId`, `matchWins.{playerId, wins}`, `cumulativeCardPoints.{playerId, points}`, `finalGameCompletionTime` | All three tiebreak fields (`matchWins`, `cumulativeCardPoints`, `finalGameCompletionTime`) are **mandatory** for correct advancement logic. TO must reject the event and raise an operational alert if any of these are absent. |
-| `MatchCompleted` | RG | SV | `matchId`, `roomId`, `matchWinnerId`, `matchPlacements[].{playerId, position, matchWins}` | `cumulativeCardPoints` may be included (it is public match data). No hand contents. |
+| `MatchCompleted` | RG | TO | `matchId`, `roomId`, `tournamentId`, `roundId`, `matchWinnerId` (nullable), `matchPlacements[].{playerId, position, matchWins, cumulativeCardPoints}`, `finalGameCompletionTime` | `matchPlacements` is the authoritative ranking. All three tiebreak fields (`matchWins`, `cumulativeCardPoints`, `finalGameCompletionTime`) are **mandatory** for correct advancement logic. TO must reject the event and raise an operational alert if any of these are absent. `matchWinnerId` is null in multi-player rooms (INV-M-08). |
+| `MatchCompleted` | RG | SV | `matchId`, `roomId`, `matchWinnerId` (nullable), `matchPlacements[].{playerId, position, matchWins}` | `cumulativeCardPoints` may be included (it is public match data). No hand contents. |
 | `RoomCompleted` | RG | TO | `roomId`, `roomType`, `tournamentId`, `roundId`, `finalStandings[].{playerId, position, matchWins, cumulativeCardPoints, completionTime}`, `outcome` | `roomType` is **mandatory** for TO to filter. TO silently ignores `RoomCompleted` events where `roomType == "casual"`. |
 | `PlayerForfeited` | RG | TO | `playerId`, `gameId`, `roomId`, `tournamentId`, `reason` | `tournamentId` must be present for TO to process the elimination. TO silently ignores events where `tournamentId == null`. |
 | `PlayerForfeited` | RG | RK | `playerId`, `gameId`, `roomId`, `roomType` | RK needs `roomType` to determine whether the forfeit happened in a casual or tournament context (for statistics segmentation). No card data needed. |

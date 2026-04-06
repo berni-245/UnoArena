@@ -20,7 +20,7 @@ stateDiagram-v2
     }
 
     Reconnected_Valid --> Connected : PlayerReconnected\nReconnectionTimerCancelled\n(resumes with original hand)
-    Reconnected_Invalid --> ReconnectionWindowOpen : CommandRejected (SessionInvalidated)\n[window still ticking]
+    Reconnected_Invalid --> ReconnectionWindowOpen : CommandRejected (SessionInvalidated)\n[window still ticking;\nall reconnection paths blocked;\nforfeit is inevitable]
 
     WindowExpired_OffTurn --> WaitingForNextTurn : Player is now Inactive\nNo longer auto-skipped proactively
     WaitingForNextTurn --> Forfeited : Next turn arrives → PlayerForfeited

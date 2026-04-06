@@ -205,12 +205,12 @@ This phase repeats for every turn until a player empties their hand or the game 
     - The target player now has 3 cards (1 remaining + 2 penalty).
 
 **32.** **Path C -- Window expires with no challenge and no Uno call:**
-- `ChallengeWindowClosed` with `gameId`, `targetPlayerId`, `reason = expired`.
+- `UnoChallengeWindowClosed` with `gameId`, `targetPlayerId`, `reason = expired`.
 - No penalty is applied. The player "got away with" not calling Uno.
 
 **33.** **Path D -- Window closes because the next player acts:**
 - If the next player issues a command (e.g., `PlayCard` or `DrawCard`) before the window expires:
-    - `ChallengeWindowClosed` with `reason = next_player_acted`.
+    - `UnoChallengeWindowClosed` with `reason = next_player_acted`.
     - Any pending challenge is no longer valid.
 
 **34.** **Path E -- Player calls Uno concurrently with PlayCard:**
@@ -256,7 +256,7 @@ This sub-flow is triggered by step 20 when a Wild Draw Four is played. It runs *
 
 **36e.** **Path B -- Affected player accepts the draw (no challenge):**
 - The affected player does not issue a challenge within the 5-second window (either explicitly or by timeout).
-- `WildDrawFourChallengeWindowClosed` with `reason = expired` or `reason = draw_accepted`.
+- `WildDrawFourUnoChallengeWindowClosed` with `reason = expired` or `reason = draw_accepted`.
 - The standard WDF effect proceeds: `PenaltyCardsDrawn` with `playerId = affectedPlayerId`, `cardCount = 4`, `reason = wild_draw_four_card`.
 - The affected player's turn is skipped. `PlayerSkipped` emitted.
 
@@ -294,15 +294,21 @@ This sub-flow is triggered by step 20 when a Wild Draw Four is played. It runs *
 
 **38.** **Policy: CheckMatchProgress** evaluates the match state:
 - Count each player's game wins within this match.
-- **Decision point**: Has any player won 2 games (best-of-3 threshold)?
+- **Decision point (depends on room size — INV-M-04):**
+  - **2-player rooms:** Has either player won 2 games?
+  - **Multi-player rooms (3–10 players):** Have all 3 games been played? (All 3 games are always played unless the top-3 advancement outcome is mathematically determined for every slot before Game 3.)
 
-**39.** **Path A -- Match not yet decided (fewer than 2 wins by any player):**
+**39.** **Path A -- Match not yet decided:**
+- In 2-player rooms: no player has 2 wins yet.
+- In multi-player rooms: fewer than 3 games have been played and early termination conditions are not met.
 - `MatchGameCompleted` with `matchNumber`, `gameNumber`, `nextGameNumber`.
 - **Policy: StartNextGameInMatch** triggers `StartGame` for the next game within the same match.
 - Return to step 10 (deck initialization) for the new game. Turn order rotates: the starting player shifts by one position.
 
-**40.** **Path B -- Match decided (a player has 2 wins):**
-- `MatchCompleted` with `roomId`, `matchNumber`, `matchWinnerId`, `matchPlacements` (ordered by: match wins descending, then cumulative card points ascending, then earliest final-game completion time).
+**40.** **Path B -- Match decided:**
+- In 2-player rooms: a player has 2 wins.
+- In multi-player rooms: all 3 games have been played (or the early termination predicate is satisfied).
+- `MatchCompleted` with `roomId`, `matchNumber`, `matchWinnerId` (nullable — set only in 2-player rooms or single-survivor scenarios; see INV-M-08), `matchPlacements` (ordered by: match wins descending, then cumulative card points ascending, then earliest final-game completion time).
 - All players receive the match result.
 
 **41.** `MatchCompleted` -- calculate final room standings:

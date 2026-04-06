@@ -195,7 +195,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 
 ### 2.1.5 Spectator View Context
 
-**Responsibility:** Maintains a read-optimized projection of active games, purpose-built for spectator consumption. This context receives raw gameplay events and transforms them through an Anti-Corruption Layer that enforces strict privacy filtering, ensuring that no private game state (player hands, deck contents) ever crosses the boundary into spectator-visible data.
+**Responsibility:** Maintains read-optimized projections of active games and room/tournament browsing, purpose-built for spectator and lobby consumption. This context receives raw gameplay events and transforms them through an Anti-Corruption Layer that enforces strict privacy filtering, ensuring that no private game state (player hands, deck contents) ever crosses the boundary into spectator-visible data. It also maintains the lobby listing of available rooms and tournament bracket projections.
 
 **Key Aggregates:**
 
@@ -203,6 +203,8 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 |-----------|-------------|
 | **Spectator Game Projection** | A read model representing the spectator-visible state of an active game: public player information, card counts, discard pile, turn state, direction, and game phase. |
 | **Spectator Feed** | The ordered stream of spectator-safe events for a given game, consumed by spectator clients. |
+| **Available Rooms Read Model** | A read model listing casual rooms available for joining (lobby view). Updated by `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, and `RoomCompleted` events from RG. Tournament rooms are excluded. |
+| **Tournament Bracket Projection** | A read model of tournament progression for spectators: round structure, room results, advancement lines, and final standings. Updated by `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, and `TournamentCompleted` events from TO. |
 
 **Invariants:**
 
@@ -269,6 +271,8 @@ The following events from Room Gameplay drive updates to the Spectator View. Eac
 | Event | Source Context | Reaction |
 |-------|---------------|----------|
 | All gameplay state-change events listed above | Room Gameplay | Transform through ACL, update Spectator Game Projection, emit spectator-safe event to Spectator Feed. |
+| `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `TournamentCompleted` | Tournament Orchestration | Update Tournament Bracket Projection for spectator consumption. No privacy filtering needed (tournament events contain no private game state). |
+| `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `RoomCompleted` | Room Gameplay | Update Available Rooms Read Model (casual rooms only; tournament rooms excluded). |
 
 ---
 
@@ -332,18 +336,20 @@ The context map defines the relationships between all bounded contexts using sta
 +----------------------------+                   |    |
 | Tournament Orchestration   |                   |    |
 | (Downstream of Gameplay)   |                   |    |
-| Conformist                 |                   |    |
+| Partnership with RG        |                   |    |
 +----------------------------+                   |    |
-         |                                       |    |
-         | TournamentRoomAssigned                 |    |
-         +-------------------------------------->+    |
-                                                      |
-         +--------------------------------------------+
-         | All gameplay state-change events
-         v
+         |         |                             |    |
+         |         | TournamentRoomAssigned       |    |
+         |         +---------------------------->+    |
+         |                                            |
+         | Tournament progression events              |
+         | (bracket, advancement)                     |
+         |       +------------------------------------+
+         |       | All gameplay state-change events
+         v       v
 +----------------------------+     +----------------------------+
 | Spectator View             |     | Ranking & Statistics       |
-| (Downstream of Gameplay)   |     | (Downstream of Gameplay)   |
+| (Downstream of RG and TO)  |     | (Downstream of Gameplay)   |
 | ACL (privacy filtering)    |     | Conformist                 |
 +----------------------------+     +----------------------------+
                                             |
@@ -414,6 +420,15 @@ The context map defines the relationships between all bounded contexts using sta
 | **Contract** | Ranking & Statistics consumes `GameCompleted` events and extracts placement order, room type (casual vs. tournament), and player identifiers. |
 | **Key Event Flow** | `GameCompleted` (casual rooms only) --> Elo recalculation for all participants. |
 | **Filtering** | Ranking & Statistics is responsible for filtering: it ignores `GameCompleted` events from tournament rooms and abandoned games. |
+
+#### Tournament Orchestration --> Spectator View
+
+| Aspect | Detail |
+|--------|--------|
+| **Pattern** | Conformist (Spectator View conforms to Tournament Orchestration's event schema) |
+| **Direction** | Tournament Orchestration is **Upstream (U)**; Spectator View is **Downstream (D)** |
+| **Contract** | Spectator View consumes tournament progression events (`TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `TournamentCompleted`) and projects them into the Tournament Bracket Projection read model. No privacy filtering is required because tournament events contain no private game state. |
+| **Key Event Flow** | `PlayerAdvanced` / `PlayerEliminated` --> bracket visualization update. `TournamentCompleted` --> final standings display. |
 
 #### Room Gameplay --> Spectator View
 

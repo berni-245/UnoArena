@@ -80,6 +80,7 @@ The flowchart above is **illustrative, not exhaustive**. Additional transformati
 | `DirectionReversed` | `SpectatorDirectionReversed` (pass-through) |
 | `PlayerSkipped` | `SpectatorPlayerSkipped` (pass-through) |
 | `ColorChosen` | `SpectatorColorChosen` (pass-through) |
+| `PenaltyCardsDrawn` | `SpectatorPenaltyCardsDrawn` (card identities stripped; retain: playerId, card count delta, reason) |
 | `PlayerReconnected` | `SpectatorPlayerReconnected` (pass-through) |
 | `MatchCompleted` | `SpectatorMatchCompleted` (match score update) |
 

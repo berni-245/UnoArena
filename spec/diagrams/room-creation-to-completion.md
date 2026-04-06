@@ -18,10 +18,11 @@ sequenceDiagram
 
     P2->>RG: JoinRoom {roomId} (repeated per player)
     RG-->>AL: PlayerJoinedRoom (×N)
-    RG-->>AvailableRoomsReadModel: RoomCreated [room visible in lobby]
+    RG-->>SV: AvailableRoomsReadModel updated [room visible in lobby]
+    Note over RG: When ≥ minPlayers joined: status transitions Waiting → Ready
 
     Host->>RG: StartMatch {roomId}
-    RG->>RG: Validate: ≥2 players, status=waiting or ready, issuer=host
+    RG->>RG: Validate: ≥2 players, status=ready, issuer=host
 
     %% === GAME 1 ===
     RG->>RG: InitializeDeck (server-side RNG, seed recorded)

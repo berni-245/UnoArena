@@ -14,12 +14,13 @@ graph LR
     ID -->|"U/D, OHS"| RS
     ID -->|"U/D, Conformist"| AL
 
-    RG -->|"U/D, Conformist"| TO
+    RG -->|"Partnership"| TO
     RG -->|"U/D, Conformist"| RS
     RG -->|"U/D, ACL - privacy filter"| SV
     RG -->|"U/D, Conformist"| AL
 
-    TO -->|"U/D, room creation commands"| RG
+    TO -->|"Partnership"| RG
+    TO -->|"U/D, Conformist"| SV
     TO -->|"U/D, Conformist"| AL
 
     RS -->|"U/D, Conformist"| AL

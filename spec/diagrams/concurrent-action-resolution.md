@@ -50,13 +50,18 @@ sequenceDiagram
     GA->>GA: Process CallUno (arrived first)
     GA->>GA: Set: unoCalled[PT] = true
     GA-->>AL: UnoCallMade {playerId=PT}
-    GA-->>AL: ChallengeWindowClosed {reason=uno_called}
+    Note over GA: Window remains open — opponents may still challenge
 
     GA->>GA: Process ChallengeUnoCall
-    GA->>GA: Check: challengeWindowOpen? ❌ (already closed by UnoCallMade)
-    GA-->>PC: CommandRejected {reason=ChallengeWindowClosed}
+    GA->>GA: Check: challengeWindowOpen? ✅ (window still open)
+    GA->>GA: Check: unoCalled[PT]? ✅ (player DID call Uno)
+    GA-->>AL: ChallengeMade {challengerId=PC, targetId=PT}
+    GA-->>AL: ChallengeResolved {outcome=challenger_penalized}
+    GA->>GA: Apply: PC draws 2 penalty cards (false challenge)
+    GA-->>AL: PenaltyCardsDrawn {playerId=PC, cardCount=2}
+    GA-->>AL: UnoChallengeWindowClosed {reason=challenge_resolved}
 
-    Note over PC: Race condition — no penalty assessed; PC challenged in good faith within their perceived window
+    Note over PC: Challenger loses — player had validly called Uno
 ```
 
 ## Scenario 3: Two Simultaneous Challenges

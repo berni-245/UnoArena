@@ -16,8 +16,9 @@ stateDiagram-v2
     Game2InProgress --> Game2InProgress : Player forfeits\n(game continues, forfeiter receives lowest available placement position)
     Game2InProgress --> MatchAbandoned : All players forfeit
 
-    Game2Completed --> MatchCompleted : A player has 2 wins\n(match winner determined)
-    Game2Completed --> Game3InProgress : No player has 2 wins\n(start decisive Game 3)
+    Game2Completed --> MatchCompleted : 2-player room:\na player has 2 wins
+    Game2Completed --> Game3InProgress : Multi-player room:\nalways play Game 3\n(unless top-3 rankings\nmathematically determined,\nINV-M-04)
+    Game2Completed --> Game3InProgress : 2-player room:\nno player has 2 wins yet
 
     Game3InProgress --> Game3Completed : Game 3 ends (winner determined)
     Game3InProgress --> Game3InProgress : Player forfeits\n(game continues, forfeiter receives lowest available placement position)

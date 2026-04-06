@@ -29,8 +29,19 @@ sequenceDiagram
         else Card is Wild
             GameAggregate->>GameAggregate: Apply Wild (color chosen by player)
         else Card is WildDrawFour
-            GameAggregate->>GameAggregate: Apply WildDrawFour (color chosen, next draws 4)
-            GameAggregate->>NextPlayer: ForceDraw(4)
+            GameAggregate->>GameAggregate: Apply WildDrawFour (color chosen by player)
+            GameAggregate->>Opponents: WildDrawFourChallengeWindowOpened
+            Note over GameAggregate,NextPlayer: 5-second window: only affected next player may challenge
+            alt Next player challenges (ChallengeWildDrawFour)
+                alt Bluff confirmed (player held matching-color card)
+                    GameAggregate->>Player: ForceDraw(4) (penalty for bluffing)
+                    Note over GameAggregate: Next player does NOT draw
+                else Legitimate play (no matching-color card)
+                    GameAggregate->>NextPlayer: ForceDraw(6) (4 WDF + 2 penalty)
+                end
+            else Window expires or next player acts without challenging
+                GameAggregate->>NextPlayer: ForceDraw(4)
+            end
         end
 
         alt Penultimate card played (1 card remaining)
