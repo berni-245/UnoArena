@@ -346,7 +346,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 **Preconditions:**
 1. Player has a valid, active session.
-2. Room exists and has status `waiting`.
+2. Room exists and has status `waiting` or `ready`.
 3. Player is not already a member of this room.
 4. Player is not a member of another active room.
 5. Room has not reached `maxPlayers`.
@@ -360,7 +360,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 |-------------|-------------|-------------|
 | `invalid_session` | 401 | Session token is invalid or expired |
 | `room_not_found` | 404 | Room does not exist |
-| `room_not_waiting` | 409 | Room is already in progress or completed |
+| `room_not_accepting_players` | 409 | Room is already in progress or completed |
 | `room_full` | 409 | Room has reached maximum player capacity |
 | `player_already_in_room` | 409 | Player is already a member of this or another active room |
 
@@ -442,7 +442,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 | `invalid_session` | 401 | Session token is invalid or expired |
 | `not_host` | 403 | Only the room host can start the game |
 | `insufficient_players` | 409 | Fewer than 2 players in the room |
-| `room_not_waiting` | 409 | Room is already in progress or completed |
+| `room_not_accepting_players` | 409 | Room is already in progress or completed |
 
 **Idempotency Behavior:**
 - Replaying with the same `commandId` returns the cached response. The game is not started twice.
@@ -479,9 +479,8 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 6. The card is a legal play:
    a. Same color as the current active color, OR
    b. Same number / action symbol as the discard pile top card, OR
-   c. The card is a Wild or Wild Draw Four (always playable).
-7. Wild Draw Four legality: the player must not hold any card matching the current active color (server-enforced).
-8. If card is Wild or Wild Draw Four: `declaredColor` must be provided and must be one of the four valid colors.
+   c. The card is a Wild or Wild Draw Four (always playable — the server does not enforce the color-match restriction on Wild Draw Four; bluffing is permitted per A9. Enforcement occurs exclusively through the WDF Challenge mechanism).
+7. If card is Wild or Wild Draw Four: `declaredColor` must be provided and must be one of the four valid colors.
 
 **Resulting Events (happy path):**
 - `CardPlayed` with card identity, game state changes, remaining hand size.
@@ -500,7 +499,6 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 | `stale_sequence_number` | 409 | Sequence number mismatch (optimistic concurrency) |
 | `card_not_in_hand` | 400 | Specified card is not in the player's hand |
 | `illegal_play` | 400 | Card does not legally match the discard pile state |
-| `illegal_wild_draw_four` | 400 | Player holds a card matching the active color |
 | `declared_color_required` | 400 | Wild card played without specifying a color |
 | `invalid_declared_color` | 400 | Declared color is not one of the four valid values |
 

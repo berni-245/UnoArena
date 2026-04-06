@@ -20,24 +20,24 @@ The Room Gameplay context is the core domain. It owns the lifecycle of Rooms, Ma
 
 #### State Machine
 
-The Room transitions through the following states in strict order:
+The Room transitions through the following states:
 
 ```
-Waiting --> Ready --> InProgress --> Completed
-                                   ^
-                                   | (if all players forfeit before
-                   Abandoned <------  match conclusion)
+Waiting <--> Ready --> InProgress --> Completed
+                                     ^
+                                     | (if all players forfeit before
+                     Abandoned <------  match conclusion)
 ```
 
 | State | Meaning | Entry Condition | Exit Condition |
 |-------|---------|-----------------|----------------|
-| `Waiting` | Room is open; players may join or leave. No active Match or Game. | Room creation. | Minimum player count is met. |
-| `Ready` | Minimum player count is satisfied; host may now issue `StartMatch`. | Minimum player count is met. | `StartMatch` command accepted; or player count drops below minimum (→ back to `Waiting`). |
+| `Waiting` | Room is open; players may join or leave. No active Match or Game. | Room creation; or player count drops below minimum from `Ready`. | Minimum player count is met (→ `Ready`). |
+| `Ready` | Minimum player count is satisfied; host may now issue `StartMatch`. Players may still join until `maxPlayers` is reached. | Minimum player count is met. | `StartMatch` command accepted (→ `InProgress`); or player count drops below minimum (→ back to `Waiting`). |
 | `InProgress` | At least one Game in the Match is underway or has been played. Room is locked to new entrants. | First `GameStarted` event emitted for Game 1. | Match conclusion (Match winner determined or Abandoned condition met). |
 | `Completed` | Terminal state. The Match has concluded with a valid outcome. Results have been emitted. | Match completed with at least one valid Game. | None (terminal). |
 | `Abandoned` | Terminal state. All remaining players forfeited before a Match winner was determined. No Elo updates are issued. | All active PlayerSlots reach forfeited status simultaneously. | None (terminal). |
 
-Note: `Waiting` and `Ready` are sub-states of the broader "pre-game" phase. Transitions are irreversible. A Room that has reached `Completed` or `Abandoned` is immutable; no further commands are accepted.
+Note: `Waiting` and `Ready` are sub-states of the broader "pre-game" phase. The `Waiting` ↔ `Ready` transition is bidirectional (player joins/leaves may toggle between them). All transitions from `InProgress` onward are irreversible. A Room that has reached `Completed` or `Abandoned` is immutable; no further commands are accepted.
 
 #### Attributes
 
@@ -62,9 +62,9 @@ Note: `Waiting` and `Ready` are sub-states of the broader "pre-game" phase. Tran
 - **INV-R-01:** `maxPlayers` must be in the range [2, 10] inclusive.
 - **INV-R-02:** The number of occupied Player Slots must never exceed `maxPlayers`.
 - **INV-R-03:** A `StartMatch` command is accepted only when: (a) `status` is `Waiting` or `Ready`, (b) the commanding player is the `hostPlayerId`, and (c) there are at least 2 occupied, non-forfeited Player Slots.
-- **INV-R-04:** Once `status` is `InProgress`, no new players may join. Player Slot additions are only permitted in `Waiting` state.
+- **INV-R-04:** Once `status` is `InProgress`, no new players may join. Player Slot additions are permitted in `Waiting` or `Ready` states.
 - **INV-R-05:** A Player may occupy at most one Player Slot within this Room.
-- **INV-R-06:** State transitions are strictly ordered and irreversible: `Waiting` → `Ready` → `InProgress` → (`Completed` | `Abandoned`). No backward transitions exist.
+- **INV-R-06:** State transitions follow this order: `Waiting` ↔ `Ready` → `InProgress` → (`Completed` | `Abandoned`). The `Waiting` ↔ `Ready` transition is bidirectional (a player leaving in `Ready` state may drop the count below minimum, reverting to `Waiting`). All transitions from `InProgress` onward are irreversible.
 - **INV-R-07:** The Room may contain at most one `Match` at any time. A second Match cannot be initiated within the same Room.
 - **INV-R-08:** The Room transitions to `Completed` only after the Match entity signals match completion (a player wins 2 out of 3 Games, or the last-player-standing condition is met per A17).
 - **INV-R-09:** The Room transitions to `Abandoned` only when all Player Slots have status `forfeited` simultaneously, leaving no active player who could win the Match.

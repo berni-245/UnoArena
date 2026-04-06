@@ -67,7 +67,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 - During the reconnection window, the disconnected player's turn is skipped (treated as a pass).
 - A room in `waiting` state may not start a match until minimum player count is reached.
 - Each game's deck state is generated server-side and appended to the immutable game log before any card is dealt or drawn.
-- A match consists of at most 3 games; the first player to win 2 games wins the match.
+- A match consists of at most 3 games. In 2-player rooms, the first player to win 2 games wins the match. In multi-player rooms (3--10 players), all 3 games are played and players are ranked by match wins, then cumulative card points, then earliest completion time (A15, A16).
 - All state mutations are appended to the game log before being broadcast.
 
 **Events Produced (Outbound):**
@@ -91,7 +91,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `UnoChallengeWindowOpened` | The 5-second challenge window has begun. |
 | `ChallengeMade` | An opponent challenged a player's Uno call (or lack thereof). |
 | `ChallengeResolved` | A challenge has been adjudicated. Includes `outcome` field: `challenger_penalized` (Uno was called) or `target_penalized` (Uno was not called). |
-| `PenaltyCardsDrawn` | A player drew penalty cards as a result of a challenge resolution. Includes player, card count, and reason. |
+| `PenaltyCardsDrawn` | A player was forced to draw cards, either as a result of a challenge resolution or a card effect (Draw Two, Wild Draw Four). Includes player, card count, and reason (which distinguishes the cause). |
 | `UnoChallengeWindowClosed` | The challenge window has expired without a challenge. |
 | `PlayerDisconnected` | A player's connection has been lost; reconnection timer started. |
 | `PlayerReconnected` | A player has reconnected within the 60-second window. |
