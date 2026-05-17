@@ -39,11 +39,14 @@ Solution architecture for a global real-time Uno platform supporting ad-hoc room
 | 7 | [Persistence Layer](07-persistence.md) | Store per context, consistency model, read models, retention |
 | 8 | [Capacity Sketch](08-capacity-sketch.md) | Order-of-magnitude reasoning for 1M-player tournaments |
 
-### Architecture Decision Records (§7)
+### Strongly Recommended (§7)
 
 | # | Document | Description |
 |---|----------|-------------|
 | 9 | [ADRs](09-adr/index.md) | Top architectural decisions — event sourcing, Kafka, timer service, client protocol, database-per-context, kickoff worker, spectator projection, API gateway |
+| 11 | [NFR Matrix](11-nfr-matrix.md) | Latency budgets, throughput targets, and availability SLOs per flow and service |
+| 12 | [Threat Model](12-threat-model.md) | STRIDE analysis — session takeover, event tampering, hand data disclosure, DoS, privilege escalation |
+| 13 | [Observability Architecture](13-observability.md) | Per-service metrics, structured logs, distributed tracing, tournament round health dashboard |
 
 ### Mandatory Diagrams
 
