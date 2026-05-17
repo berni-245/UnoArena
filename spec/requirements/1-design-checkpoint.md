@@ -1,6 +1,6 @@
 # TP Final 
 
-**Design Assigment Instructions**
+**Design checkpoint Instructions**
 
 ## **1) Context (must be included in your analysis)**
 
