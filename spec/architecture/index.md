@@ -1,6 +1,6 @@
 # UnoArena — Architecture Specification
 
-Solution architecture for a global real-time Uno platform supporting ad-hoc rooms (2–10 players) and massive elimination tournaments (up to 1,000,000 players). Translates the [Domain Model Design](../spec/index.md) into deployable microservices, integration contracts, and persistence decisions.
+Solution architecture for a global real-time Uno platform supporting ad-hoc rooms (2–10 players) and massive elimination tournaments (up to 1,000,000 players). Translates the [Domain Model Design](../domain/index.md) into deployable microservices, integration contracts, and persistence decisions.
 
 ---
 
@@ -51,7 +51,7 @@ Solution architecture for a global real-time Uno platform supporting ad-hoc room
 
 | Document | Description |
 |----------|-------------|
-| [CHANGELOG-design.md](CHANGELOG-design.md) | Deltas from Design Checkpoint, with rationale |
+| [CHANGELOG-design.md](04-CHANGELOG-design.md) | Deltas from Design Checkpoint, with rationale |
 
 ### Strongly Recommended (§7)
 
@@ -63,4 +63,4 @@ Solution architecture for a global real-time Uno platform supporting ad-hoc room
 
 ## Traceability
 
-All service interfaces, event names, and API surfaces trace back to the [Commands & Events Catalog](../spec/docs/04-commands-and-domain-events.md) and [Bounded Contexts](../spec/docs/02-bounded-contexts-and-context-map.md) from the Design Checkpoint. Deltas are documented in [CHANGELOG-design.md](CHANGELOG-design.md).
+All service interfaces, event names, and API surfaces trace back to the [Commands & Events Catalog](../domain/docs/04-commands-and-domain-events.md) and [Bounded Contexts](../domain/docs/02-bounded-contexts-and-context-map.md) from the Design Checkpoint. Deltas are documented in [CHANGELOG-design.md](04-CHANGELOG-design.md).
