@@ -1,6 +1,6 @@
 # 1. Context View — Bounded Contexts to Deployable Services
 
-> Maps each bounded context from the [Design Checkpoint](../spec/docs/02-bounded-contexts-and-context-map.md) to concrete deployable components. Every service listed here traces to aggregates, commands, and events defined in the design package.
+> Maps each bounded context from the [Design Checkpoint](../../domain/docs/02-bounded-contexts-and-context-map.md) to concrete deployable components. Every service listed here traces to aggregates, commands, and events defined in the design package.
 
 ---
 

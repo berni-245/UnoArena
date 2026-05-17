@@ -1,6 +1,6 @@
 # Audit & Game Log — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.6](../../spec/docs/02-bounded-contexts-and-context-map.md), [Spec §3 — Game Log Entity, Audit Trail Entity](../../spec/docs/03-aggregates-entities-value-objects.md)
+> **Design reference:** [Spec §2.1.6](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Spec §3 — Game Log Entity, Audit Trail Entity](../../../domain/docs/03-aggregates-entities-value-objects.md)
 
 ---
 

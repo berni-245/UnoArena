@@ -1,6 +1,6 @@
 # Tournament Orchestration — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.3](../../spec/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.3](../../spec/docs/04-commands-and-domain-events.md), [Flows §5 Flow 2](../../spec/docs/05-domain-event-flows.md), [Consistency §7.3](../../spec/docs/07-consistency-and-recovery-strategy.md)
+> **Design reference:** [Spec §2.1.3](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.3](../../../domain/docs/04-commands-and-domain-events.md), [Flows §5 Flow 2](../../../domain/docs/05-domain-event-flows.md), [Consistency §7.3](../../../domain/docs/07-consistency-and-recovery-strategy.md)
 
 ---
 

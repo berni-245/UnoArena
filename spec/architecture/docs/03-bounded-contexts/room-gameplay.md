@@ -1,6 +1,6 @@
 # Room Gameplay — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.2](../../spec/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.2](../../spec/docs/04-commands-and-domain-events.md), [Flows §5](../../spec/docs/05-domain-event-flows.md), [Consistency §7](../../spec/docs/07-consistency-and-recovery-strategy.md)
+> **Design reference:** [Spec §2.1.2](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.2](../../../domain/docs/04-commands-and-domain-events.md), [Flows §5](../../../domain/docs/05-domain-event-flows.md), [Consistency §7](../../../domain/docs/07-consistency-and-recovery-strategy.md)
 
 ---
 

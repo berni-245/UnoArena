@@ -1,6 +1,6 @@
 # Spectator View — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.5](../../spec/docs/02-bounded-contexts-and-context-map.md), [Diagrams: spectator-projection](../../spec/diagrams/spectator-projection.md)
+> **Design reference:** [Spec §2.1.5](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Diagrams: spectator-projection](../../../domain/diagrams/spectator-projection.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # 4. Integration Table — Communication Patterns
 
-> Documents every significant inter-component integration in UnoArena. Each row traces to named commands/events from the [Design Checkpoint](../domain/docs/04-commands-and-domain-events.md). Corresponds to §6.3 of the Architecture Checkpoint.
+> Documents every significant inter-component integration in UnoArena. Each row traces to named commands/events from the [Design Checkpoint](../../domain/docs/04-commands-and-domain-events.md). Corresponds to §6.3 of the Architecture Checkpoint.
 
 ---
 
@@ -114,7 +114,7 @@
 
 ## 4.9 Traceability Note
 
-Every integration row above traces to named commands and events in the [Commands & Events Catalog](../domain/docs/04-commands-and-domain-events.md):
+Every integration row above traces to named commands and events in the [Commands & Events Catalog](../../domain/docs/04-commands-and-domain-events.md):
 
 - **Synchronous endpoints** map to commands: `RegisterPlayer`, `Login`, `CreateRoom`, `JoinRoom`, `PlayCard`, `DrawCard`, `CallUno`, `CreateTournament`, `StartTournament`.
 - **Async events** match the published event catalog: `SessionInvalidated`, `GameCompleted`, `MatchCompleted`, `RoomCompleted`, `PlayerForfeited`, `TournamentRoomAssigned`, `PlayerAdvanced`, `EloUpdated`, etc.

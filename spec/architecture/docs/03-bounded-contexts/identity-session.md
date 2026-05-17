@@ -1,6 +1,6 @@
 # Identity & Session — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.1](../../spec/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.1](../../spec/docs/04-commands-and-domain-events.md)
+> **Design reference:** [Spec §2.1.1](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Commands §4.2.1](../../../domain/docs/04-commands-and-domain-events.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # Ranking & Statistics — Bounded Context Architecture
 
-> **Design reference:** [Spec §2.1.4](../../spec/docs/02-bounded-contexts-and-context-map.md), [Flows §5 Flow 3](../../spec/docs/05-domain-event-flows.md), [Consistency §7.3](../../spec/docs/07-consistency-and-recovery-strategy.md)
+> **Design reference:** [Spec §2.1.4](../../../domain/docs/02-bounded-contexts-and-context-map.md), [Flows §5 Flow 3](../../../domain/docs/05-domain-event-flows.md), [Consistency §7.3](../../../domain/docs/07-consistency-and-recovery-strategy.md)
 
 ---
 
