@@ -171,8 +171,8 @@ These limits are configurable and subject to adaptive throttling based on system
 **A31: Event integrity uses HMAC with per-room secrets.**
 Critical domain events (game state changes, Elo updates, tournament advancement decisions) are signed using HMAC with a per-room secret generated at room creation. The secret is stored securely and is never exposed to clients or spectators. This provides tamper evidence for the immutable game log.
 
-**A32: Audit log retention is differentiated by room type.**
-Tournament game logs and audit entries are retained indefinitely (required for dispute resolution in competitive play). Casual game logs are retained for 90 days, after which they may be archived or purged. This is an operational assumption; the domain model treats all events as immutable within their retention period.
+**A32: Audit log retention follows minimum retention periods.**
+The cross-context audit trail is retained for a minimum of 2 years to satisfy compliance and dispute resolution requirements. Game logs (all room types) are retained for a minimum of 1 year in active storage; after that they may be archived to cold storage but must remain queryable for compliance exports. Processed-events deduplication indexes are an operational artifact and may be pruned after their usefulness window (typically days to weeks). The domain model treats all audit and game log entries as immutable within their retention period.
 
 ---
 

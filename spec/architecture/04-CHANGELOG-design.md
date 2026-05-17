@@ -413,4 +413,87 @@ The following Design Checkpoint non-negotiable guarantees are affirmed as intact
 
 ---
 
-*Generated for Architecture Checkpoint — 2026-05-17. All cross-references use document section numbers from the design package in `spec/domain/docs/`.*
+## Part VII — Post-Review Corrections (Design Checkpoint Evaluator Feedback)
+
+The following changes address deductions reported by the course evaluator on the Design Checkpoint submission. They are separate from the Architecture Checkpoint deltas above and are catalogued here for traceability.
+
+---
+
+### Correction A — Match Definition: Multi-Player Semantics Added to INV-R-08
+
+**File:** `spec/domain/docs/03-aggregates-entities-value-objects.md` — INV-R-08
+
+**Deliverable:** *Deliverable 3 — Aggregates, entities, and value objects*
+
+**Issue:** INV-R-08 read "a player wins 2 out of 3 Games," which is unambiguous only for 2-player rooms. For multi-player rooms (3–10 players), only one player wins each game so the "2 out of 3" framing does not apply — all 3 games are played and a ranking is established.
+
+**Delta:** INV-R-08 updated to explicitly distinguish the two cases: 2-player rooms end when one player reaches 2 wins; multi-player rooms conclude after all 3 Games (or last-player-standing) per INV-M-04 and A15/A16.
+
+**Note:** The glossary entry for Match (doc 01, term 2) already contained the correct multi-player semantics. This correction aligns INV-R-08 with it.
+
+**Non-negotiable confirmation:** INV-M-04 (the authoritative multi-player match rule) is unchanged. INV-R-08 now references it explicitly.
+
+---
+
+### Correction B — Sequence Number Scope Clarified: INV-R-12 vs INV-G-05
+
+**File:** `spec/domain/docs/03-aggregates-entities-value-objects.md` — INV-R-12
+
+**Deliverable:** *Deliverable 3 — Aggregates, entities, and value objects*
+
+**Issue:** INV-R-12 ("All commands issued to this aggregate must carry a valid SequenceNumber") was read as potentially conflicting with INV-G-05 (the Game aggregate's independent sequence counter). The overlap was ambiguous about which commands are governed by which sequence.
+
+**Delta:** INV-R-12 updated to explicitly state that it applies only to **Room-level commands** (`JoinRoom`, `LeaveRoom`, `StartMatch`, `ForfeitGame`) and that gameplay commands (`PlayCard`, `DrawCard`, `PassTurn`, etc.) are governed exclusively by INV-G-05. The two sequences are independent.
+
+**Non-negotiable confirmation:** Both INV-R-12 (Room sequence) and INV-G-05 (Game sequence, including the challenge-window exception from Change 4) are maintained without weakening either.
+
+---
+
+### Correction C — Spectator Privacy: Active Player as Spectator Scenario Added
+
+**File:** `spec/domain/docs/06-edge-cases-and-failure-paths.md` — Section 6.6 (new subsection 6.6.4; prior 6.6.4 renumbered to 6.6.5)
+
+**Deliverable:** *Deliverable 6 — Edge cases and failure paths*
+
+**Issue:** The required scenario — "an active player opens a second connection as an anonymous spectator in their own room" — was not explicitly documented as a named edge case, even though the underlying protection mechanisms (ACL, INV-SGP-01, INV-SGP-03) were already in place.
+
+**Delta:** New subsection 6.6.4 added, titled "Active Player Opens a Second Connection as Anonymous Spectator in Their Own Room." It documents: (a) the scenario, (b) why the ACL is unconditional regardless of subscriber identity, (c) that the spectator projection is a strict subset of what a participant already observes, and (d) that there is no information gain. References INV-SGP-01, INV-SGP-03, INV-SGP-05. Summary table row added.
+
+**Non-negotiable confirmation:** INV-SGP-01 (privacy hard boundary) is unchanged and confirmed to hold unconditionally — identity of the subscriber is irrelevant to ACL enforcement.
+
+---
+
+### Correction D — K-Factor Model: Internal Consistency Restored
+
+**File:** `spec/domain/docs/07-consistency-and-recovery-strategy.md` — Section 7.3.5 (Elo Update Pipeline)
+**File:** `spec/domain/docs/03-aggregates-entities-value-objects.md` — INV-PR-05 *(updated in Change 11 above)*
+**File:** `spec/domain/docs/08-assumptions-and-open-questions.md` — A24 *(already consistent)*
+
+**Deliverable:** *Deliverable 7 — Consistency and recovery strategy* | *Deliverable 3 — Aggregates, entities, and value objects* | *Deliverable 8 — Open questions and assumptions*
+
+**Issue:** A contradiction existed between: (a) A24 and INV-PR-05, which in their original form stated K=32 for all players, and (b) the Elo pipeline description in doc 07 and the architecture document, which used a variable K-factor schedule (K=40/20/10 by games rated). The evaluator deducted 1.0 pt for this internal inconsistency.
+
+**Resolution chosen:** Variable K-factor (Option A from evaluator's recommendation). This is the approach already implemented in the architecture document and provides better rating stability at scale.
+
+**Delta:**
+- Doc 07 §7.3.5 pipeline diagram: `K-factor = 32 (A24)` → `K-factor per player (A24): K=40 if gamesRated < 30; K=20 if 30 ≤ gamesRated < 100; K=10 if gamesRated ≥ 100`.
+- Doc 07 §7.3.5 bounded-drift note: "bounded by the K-factor of 32" → "bounded by the applicable K-factor (at most 40 for a new player)."
+- INV-PR-05 (doc 03): Updated in Change 11 above.
+- A24 (doc 08): Already reflects variable K — no further change needed.
+
+**Non-negotiable confirmation:** All Elo-scope invariants (INV-PR-01 through INV-PR-04, INV-PR-06 through INV-PR-08) are unchanged. Only the K scalar varies; the formula, floor, idempotency guarantee, and casual-only filter are unaffected.
+
+---
+
+### Post-Review Summary Table
+
+| # | File Changed | Design Checkpoint Deliverable | Evaluator Deduction | Delta |
+|---|-------------|------------------------------|---------------------|-------|
+| A | `03-aggregates.md` INV-R-08 | Deliverable 3 | -0.5 pts (Match definition ambiguity) | INV-R-08 now distinguishes 2-player vs multi-player match completion |
+| B | `03-aggregates.md` INV-R-12 | Deliverable 3 | -0.5 pts (Sequence number scope ambiguity) | INV-R-12 scoped to Room-level commands; INV-G-05 scoped to gameplay commands |
+| C | `06-edge-cases.md` §6.6.4 (new) | Deliverable 6 | -0.5 pts (Missing spectator scenario) | Added active-player-as-spectator edge case with invariant analysis |
+| D | `07-consistency.md` §7.3.5; `03-aggregates.md` INV-PR-05; `08-assumptions.md` A24 | Deliverable 7, 3, 8 | -1.0 pts (K-factor contradiction) | Variable K-factor (40/20/10) applied consistently across all three documents |
+
+---
+
+*Generated for Architecture Checkpoint — 2026-05-17, updated with post-review corrections 2026-05-17. All cross-references use document section numbers from the design package in `spec/domain/docs/`.*

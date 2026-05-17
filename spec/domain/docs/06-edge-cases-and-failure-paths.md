@@ -886,7 +886,37 @@ The full unfiltered event stream is accessible only by the internal Audit contex
 
 ---
 
-### 6.6.4 Spectator Replay Attack (Historical Game Replay)
+### 6.6.4 Active Player Opens a Second Connection as Anonymous Spectator in Their Own Room
+
+**Description.** A player who is actively participating in a Game (with cards in hand) opens a second browser tab or client session and subscribes to the spectator feed for the same Game, using an anonymous or unauthenticated connection. The intent is to observe the spectator projection of their own game, which — if unfiltered — could confirm card counts of opponents or reveal other public state they could cross-reference with their private hand.
+
+**Why this is not a privacy violation.** The Spectator View ACL is **unconditional**: it does not inspect the requester's identity before applying transformations. Every event on the spectator channel is filtered identically regardless of whether the subscriber is an anonymous outsider, an eliminated player, or an active participant in the game. The spectator projection contains only public state (card counts per player, discard pile top card, turn order, direction) — information that is already visible to all participants through the normal gameplay channel.
+
+**Analysis of potential advantage.** An active player who subscribes to the spectator feed receives:
+- Card counts for all players (already visible on the game UI).
+- The top card of the discard pile (already visible).
+- Turn direction and current player (already visible).
+
+They do **not** receive:
+- Any player's hand contents (stripped by ACL, INV-SGP-01).
+- The draw pile composition (stripped, INV-SGP-01).
+- Any state they do not already observe as a participant.
+
+There is no information gain. The spectator feed for a game is a strict subset of what any active participant already sees.
+
+**Domain behavior.** The anonymous spectator subscription is accepted normally by the Spectator View context. No identity check is performed at this boundary. The subscriber receives the standard filtered projection with the spectator delay (A35).
+
+**Events emitted.**
+- None beyond normal spectator projection updates.
+
+**Invariants that must hold.**
+- **INV-SGP-01 (Privacy Hard Boundary):** No player hand contents appear in the spectator projection under any circumstances, regardless of the subscriber's identity. This holds unconditionally.
+- **INV-SGP-03 (Read-Only):** The spectator channel is strictly read-only. A subscriber using the spectator feed cannot issue commands to the Game aggregate.
+- **INV-SGP-05 (Eventual Consistency):** The spectator projection is slightly delayed (A35), further reducing any marginal exploitation value.
+
+---
+
+### 6.6.5 Spectator Replay Attack (Historical Game Replay)
 
 **Description.** An attacker requests a replay of a completed historical game's SSE stream or event log, hoping that historical events — recorded before the ACL was properly applied — contain unfiltered card hand data.
 
@@ -1188,7 +1218,8 @@ All reshuffle seeds are recorded in the game log for replay and audit (A11).
 | 6.6.1 | ACL failure: hand leaks into spectator view | Spectator privacy | Schema validation on SV write; projection reconciliation | Projection invalidated; spectators reconnected; audit logged | `SpectatorProjectionInvalidated`, `PrivacyViolation` |
 | 6.6.2 | Spectator subscribes with elevated permissions | Spectator privacy | SV ACL filters unconditionally regardless of role | Standard spectator-safe projection returned | None |
 | 6.6.3 | Eliminated player spectates active rooms | Spectator privacy | Domain policy analysis | Permitted; only public data exposed | `SpectatorJoined` |
-| 6.6.4 | Historical game replay attack | Spectator privacy | SV replay served from filtered `SpectatorFeed` log | Spectator-safe historical projection returned; no hand data | None |
+| 6.6.4 | Active player opens spectator connection in own room | Spectator privacy | ACL unconditional; spectator projection is strict subset of participant view | No information gain; standard filtered projection returned | None |
+| 6.6.5 | Historical game replay attack | Spectator privacy | SV replay served from filtered `SpectatorFeed` log | Spectator-safe historical projection returned; no hand data | None |
 | 6.7.1 | First card flipped is Wild Draw Four | Game mechanic | `card.type == WildDrawFour` check on initial flip | Reshuffle with new seed; repeat until valid | `InitialCardRejected`, `DeckReshuffled`, `GameStarted` |
 | 6.7.2 | Draw pile exhausted mid-turn | Game mechanic | Empty draw pile detected at draw time | Discard pile reshuffled (new seed); draw proceeds; if still empty: skip draw | `DrawPileExhausted`, `DiscardPileReshuffled`, `CardDrawn` or `DrawSkipped` |
 | 6.7.3 | Last card played with open Uno window | Game mechanic | `handSize == 0` check on `CardPlayed` | Win processed immediately; challenge window closed | `CardPlayed`, `ChallengeWindowClosed(game_ended)`, `GameWon` |

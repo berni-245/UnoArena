@@ -470,7 +470,7 @@ The Elo update pipeline is not strictly a saga (it does not require compensation
         v
   [Compute Elo deltas]
   Using multi-player Elo (A25): average pairwise expected-vs-actual comparisons.
-  K-factor = 32 (A24).
+  K-factor per player (A24): K=40 if gamesRated < 30; K=20 if 30 ≤ gamesRated < 100; K=10 if gamesRated ≥ 100.
   Starting rating for new players = 1200 (A26).
         |
         v
@@ -494,7 +494,7 @@ The Elo update pipeline is not strictly a saga (it does not require compensation
 
 **Recovery from partial failure mid-pipeline:** If the pipeline crashes after atomically persisting some players but before persisting others, the `GameCompleted` event will be redelivered. For already-persisted players, the idempotency check (first step per player) short-circuits -- they are in `processed_games`. For not-yet-persisted players, the pipeline continues normally. This ensures exactly-once Elo updates per player per game, even under failure.
 
-**Bounded inconsistency on retry:** If a player played another game between the crash and the retry (their rating changed), the Elo delta computed on retry uses the new rating as the baseline. This is a known limitation: the delta will be slightly different from what it would have been at the time of the original game. The error is bounded by the K-factor (at most 32 rating points off), is transient, and self-corrects on the next game. This is accepted as an inherent limitation of eventual consistency in rating pipelines, not a domain-level correctness failure.
+**Bounded inconsistency on retry:** If a player played another game between the crash and the retry (their rating changed), the Elo delta computed on retry uses the new rating as the baseline. This is a known limitation: the delta will be slightly different from what it would have been at the time of the original game. The error is bounded by the applicable K-factor (at most 40 rating points off for a new player), is transient, and self-corrects on the next game. This is accepted as an inherent limitation of eventual consistency in rating pipelines, not a domain-level correctness failure.
 
 **Tournament games are filtered:** The pipeline's first check (`roomType == "casual"`) ensures that tournament games never flow into the Elo update path, regardless of how the `GameCompleted` event is structured. This is the RK context's responsibility (per the Conformist relationship defined in Section 2.2); it does not depend on RG to exclude tournament events.
 

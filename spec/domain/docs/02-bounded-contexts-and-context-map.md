@@ -81,22 +81,33 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `GameStarted` | A new game within a match has begun. Deck shuffled, hands dealt. |
 
 > **Internal policy trigger (does not cross context boundary):** `GameStartRequested` — emitted within the RG context when `StartMatch` is accepted; triggers the deck initialization pipeline. Not published to external consumers.
+| `DeckInitialized` | The shuffle seed and full deck composition have been recorded in the game log before any card is dealt. |
+| `InitialHandsDealt` | Initial hands have been dealt to all players. |
+| `FirstCardFlipped` | The initial top card of the discard pile has been revealed. |
 | `CardPlayed` | A player played a card. Includes card identity, player, and resulting game state changes. |
 | `CardDrawn` | A player drew a card from the deck. Includes card identity (private to consuming contexts that need it). |
 | `TurnAdvanced` | The turn has moved to the next player. |
+| `TurnPassed` | The current player passed after drawing (no playable card drawn, or card not played). |
+| `TurnSkippedDueToDisconnection` | A disconnected player's turn was automatically skipped during the reconnection window. |
+| `TurnTimedOut` | A connected player's turn timer expired; server applied auto-draw and/or auto-pass. |
 | `DirectionReversed` | Play direction changed (due to Reverse card). |
-| `PlayerSkipped` | A player's turn was skipped (due to Skip card or disconnection pass). |
+| `PlayerSkipped` | A player's turn was skipped (due to Skip card). |
 | `ColorChosen` | A player chose a color after playing a Wild card. |
 | `UnoCallMade` | A player called "Uno!" after playing their second-to-last card. |
-| `UnoChallengeWindowOpened` | The 5-second challenge window has begun. |
+| `UnoChallengeWindowOpened` | The 5-second Uno challenge window has begun. |
 | `ChallengeMade` | An opponent challenged a player's Uno call (or lack thereof). |
 | `ChallengeResolved` | A challenge has been adjudicated. Includes `outcome` field: `challenger_penalized` (Uno was called) or `target_penalized` (Uno was not called). |
-| `PenaltyCardsDrawn` | A player was forced to draw cards, either as a result of a challenge resolution or a card effect (Draw Two, Wild Draw Four). Includes player, card count, and reason (which distinguishes the cause). |
-| `UnoChallengeWindowClosed` | The challenge window has expired without a challenge. |
+| `PenaltyCardsDrawn` | A player was forced to draw cards as a result of a challenge resolution or a card effect (Draw Two, Wild Draw Four). Includes player, card count, and reason. |
+| `UnoChallengeWindowClosed` | The Uno challenge window has expired without a challenge. |
+| `WildDrawFourChallengeWindowOpened` | The 5-second Wild Draw Four challenge window has opened after a WDF was played. |
+| `WildDrawFourChallengeMade` | The affected player challenged the Wild Draw Four play within the window. |
+| `WildDrawFourChallengeResolved` | The WDF challenge has been adjudicated. Includes `outcome`: `bluff_confirmed` or `legitimate_play`. Card identities used in adjudication are never published; only the boolean result and penalty assignment are included. |
+| `WildDrawFourChallengeWindowClosed` | The WDF challenge window expired without a challenge. |
+| `DrawPileReshuffled` | The discard pile was reshuffled into a new draw pile. A new server-generated seed was recorded in the game log before the reshuffle took effect. |
 | `PlayerDisconnected` | A player's connection has been lost; reconnection timer started. |
 | `PlayerReconnected` | A player has reconnected within the 60-second window. |
 | `PlayerForfeited` | A player has forfeited (disconnection timeout or explicit forfeit). |
-| `GameCompleted` | A single game has ended. Includes final placement order and card-point totals. |
+| `GameCompleted` | A single game has ended. Includes final placement order, card-point totals, `wasAbandoned: boolean` (true if all remaining players forfeited — no winner by gameplay), and `roomType` (denormalized from the Room aggregate for downstream filtering). |
 | `MatchGameCompleted` | Emitted between games within a match (after Game 1 or Game 2) when the match has not yet been decided. Carries the current game number and the next game number. |
 | `MatchCompleted` | A best-of-three match has concluded. Includes match winner and per-game results. |
 | `RoomCompleted` | All matches in the room are finished. Includes final room results. |
@@ -135,7 +146,8 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 
 | Event | Description |
 |-------|-------------|
-| `TournamentCreated` | A new tournament has been created and registration is open. |
+| `TournamentCreated` | A new tournament has been created and registration is not yet open. |
+| `RegistrationOpened` | Tournament registration has been opened by the organizer. |
 | `PlayerRegisteredForTournament` | A player has registered for a tournament. |
 | `TournamentStarted` | Registration closed; first round is being created. |
 | `TournamentRoundCreated` | A new round has been initialized with room assignments. |
@@ -188,8 +200,9 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 
 | Event | Source Context | Reaction |
 |-------|---------------|----------|
-| `GameCompleted` | Room Gameplay | If the game was in a casual room, compute Elo deltas for all participating players based on final placement order. Update player statistics regardless of room type. |
+| `GameCompleted` | Room Gameplay | If `roomType == "casual"` and `wasAbandoned == false`, compute Elo deltas for all participating players based on final placement order. Update player statistics regardless of room type or abandonment status. |
 | `PlayerForfeited` | Room Gameplay | Update player statistics (increment forfeit count). No Elo impact unless the game subsequently completes as a casual game with remaining players. |
+| `TournamentCompleted` | Tournament Orchestration | Compute Tournament Placement Rating (TPR) for all finalists based on final tournament placement order. Update `PlayerRating.tournamentPlacementRating`. |
 
 ---
 
@@ -250,15 +263,26 @@ The following events from Room Gameplay drive updates to the Spectator View. Eac
 | `CardPlayed` | `SpectatorCardPlayed` | Retained as-is. The played card is public (it is on the discard pile). Player's remaining card count is included. |
 | `CardDrawn` | `SpectatorCardDrawn` | **Card identity stripped.** Only the player ID and new card count are included. The spectator knows a card was drawn but not which card. |
 | `TurnAdvanced` | `SpectatorTurnAdvanced` | Retained as-is. Current player identifier is included. |
+| `TurnPassed` | `SpectatorTurnPassed` | Retained as-is. |
+| `TurnSkippedDueToDisconnection` | `SpectatorTurnSkippedDueToDisconnection` | Retained as-is. |
+| `TurnTimedOut` | `SpectatorTurnTimedOut` | Retained as-is (player ID, auto-action taken). |
 | `DirectionReversed` | `SpectatorDirectionReversed` | Retained as-is. |
-| `PlayerSkipped` | `SpectatorPlayerSkipped` | Retained as-is. Includes reason (Skip card, disconnection pass). |
+| `PlayerSkipped` | `SpectatorPlayerSkipped` | Retained as-is. Includes reason (Skip card). |
 | `ColorChosen` | `SpectatorColorChosen` | Retained as-is. Chosen color is public. |
 | `UnoCallMade` | `SpectatorUnoCallMade` | Retained as-is. |
 | `ChallengeMade` | `SpectatorChallengeMade` | Retained as-is. Challenger and challenged player identifiers included. |
 | `ChallengeResolved` | `SpectatorChallengeResolved` | Outcome retained (who was penalized). Penalty card identities stripped; only the resulting card count change is included. |
+| `PenaltyCardsDrawn` | `SpectatorPenaltyCardsDrawn` | **Card identities stripped.** Only `playerId`, card count, and reason (challenge vs. card effect) are retained. |
+| `WildDrawFourChallengeWindowOpened` | `SpectatorWDFChallengeWindowOpened` | **Hand snapshot stripped.** Retained: affected player, challenged player, window duration. |
+| `WildDrawFourChallengeMade` | `SpectatorWDFChallengeMade` | Retained as-is (challenger and challenged player identifiers). |
+| `WildDrawFourChallengeResolved` | `SpectatorWDFChallengeResolved` | **Hand contents stripped.** Retained: outcome (`bluff_confirmed` / `legitimate_play`), who was penalized. Penalty card identities not revealed. |
+| `WildDrawFourChallengeWindowClosed` | `SpectatorWDFChallengeWindowClosed` | Retained as-is. |
+| `DrawPileReshuffled` | `SpectatorDrawPileReshuffled` | **Reshuffle seed stripped.** Only the occurrence of the reshuffle is retained. |
+| `DeckInitialized`, `InitialHandsDealt`, `FirstCardFlipped` | — | **Not projected.** These occur during the `Initializing` phase before spectators can observe the game. Spectator projection begins at `GameStarted`. |
 | `GameCompleted` | `SpectatorGameCompleted` | Final placement order retained. Hand contents at end of game are not revealed. |
 | `PlayerDisconnected` | `SpectatorPlayerDisconnected` | Retained as-is. Spectators see that a player has disconnected. |
 | `PlayerReconnected` | `SpectatorPlayerReconnected` | Retained as-is. |
+| `PlayerForfeited` | `SpectatorPlayerForfeited` | Retained: `playerId`, `reason`. Player removed from active participants in projection. |
 
 **Events Produced (Outbound):**
 
@@ -598,6 +622,8 @@ Room Gameplay                 Tournament Orchestration
 
 ### 2.3.4 SessionInvalidated --> Forced Disconnect
 
+**Domain delivery requirement:** The `SessionInvalidated` event must reach every component that holds a live connection for the superseded session — not only the game state service. A delivery that only updates stored session status, without terminating the active connection, does not satisfy this invariant. The component holding the live connection must close it promptly so the superseded session cannot observe further game state.
+
 ```
 Identity & Session              Room Gameplay
      |                                    |
@@ -606,7 +632,7 @@ Identity & Session              Room Gameplay
      |    reason: "new_login" |            |
      |    "explicit_logout" |              |
      |    "admin_action" }                 |
-     |----------------------------------->|
+     |----------------------------------->| (also delivered to live-connection holder)
      |                                    | 1. Find active game for playerId
      |                                    | 2. If player is in a game:
      |                                    |    a. Emit PlayerDisconnected

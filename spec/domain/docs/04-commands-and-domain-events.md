@@ -74,17 +74,18 @@ Sequence numbers serve two distinct purposes in UnoArena, and the two scopes mus
 
 **Per-Game Sequence Number (concurrency control within a Game aggregate):**
 - Each `Game` aggregate maintains a monotonically increasing counter, starting at 1.
-- Every command targeting a game (`PlayCard`, `DrawCard`, `PassTurn`, `CallUno`, `ChallengeUnoCall`) must include the `sequenceNumber` that the client believes is current.
+- Every command targeting a game (`PlayCard`, `DrawCard`, `PassTurn`) must include the `sequenceNumber` that the client believes is current.
 - Before processing the command, the Game aggregate checks: `command.sequenceNumber == game.expectedSequenceNumber`. If the numbers do not match, the command is rejected with `CommandRejected` (HTTP 409 Conflict, reason: `stale_sequence_number`).
 - After successfully processing a command, the aggregate increments the sequence number by 1.
-- This provides optimistic concurrency control: clients reconcile their state from the SSE event stream and retry with the correct number.
+- This provides optimistic concurrency control: clients reconcile their state from the event stream and retry with the correct number.
 
 **Per-Player Sequence Number (ordering of a player's own commands):**
 - Within a single game, each player's commands are ordered by their own per-player sequence number.
 - This allows the server to detect if a player has missed an acknowledgement and is replaying a command from an earlier state.
 
 **Commands that do not require sequence numbers:**
-- Commands that operate on aggregates with lower concurrency risk (e.g., `RegisterPlayer`, `CreateRoom`, `JoinRoom`, `RegisterForTournament`) do not require a sequence number. These aggregates enforce their invariants through other means (existence checks, status checks).
+- Commands operating on aggregates with lower concurrency risk (e.g., `RegisterPlayer`, `CreateRoom`, `JoinRoom`, `RegisterForTournament`) do not require a sequence number. These aggregates enforce their invariants through other means (existence checks, status checks).
+- **Time-sensitive challenge window commands — `CallUno`, `ChallengeUnoCall`, `ChallengeWildDrawFour` — do not require sequence numbers.** These commands may be issued by any opponent (not only the current player) within a server-enforced time window. Their validity is governed exclusively by the window state (INV-G-06, INV-G-24): the window must be `Open` at server processing time. Requiring a per-player sequence number would create an ordering dependency that conflicts with the multi-actor, time-bounded nature of challenges. Late challenges (arriving after the window closes) are rejected regardless of sequence number.
 
 ### 4.1.4 Idempotency
 
