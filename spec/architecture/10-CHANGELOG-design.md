@@ -1,4 +1,4 @@
-# 4-CHANGELOG-design.md — Design Package Updates for Architecture Checkpoint
+# 10 — CHANGELOG-design.md — Design Package Updates for Architecture Checkpoint
 
 > **Scope:** This changelog documents every modification made to the UnoArena domain design artifacts after crossing them with the Architecture Checkpoint (`spec/requirements/2-architecture-checkpoint.md`) and the per-context architecture documents (`spec/architecture/03-bounded-contexts/*`). It follows the minimum-bar requirements of §6.2 of the Architecture Checkpoint assignment.
 >

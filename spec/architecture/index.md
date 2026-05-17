@@ -39,6 +39,12 @@ Solution architecture for a global real-time Uno platform supporting ad-hoc room
 | 7 | [Persistence Layer](07-persistence.md) | Store per context, consistency model, read models, retention |
 | 8 | [Capacity Sketch](08-capacity-sketch.md) | Order-of-magnitude reasoning for 1M-player tournaments |
 
+### Architecture Decision Records (§7)
+
+| # | Document | Description |
+|---|----------|-------------|
+| 9 | [ADRs](09-adr/index.md) | Top architectural decisions — event sourcing, Kafka, timer service, client protocol, database-per-context, kickoff worker, spectator projection, API gateway |
+
 ### Mandatory Diagrams
 
 | Diagram | Description |
@@ -49,18 +55,12 @@ Solution architecture for a global real-time Uno platform supporting ad-hoc room
 
 ### Design Alignment (§6.2)
 
-| Document | Description |
-|----------|-------------|
-| [CHANGELOG-design.md](04-CHANGELOG-design.md) | Deltas from Design Checkpoint, with rationale |
-
-### Strongly Recommended (§7)
-
-| Document | Description |
-|----------|-------------|
-| [ADRs](optional/adr/) | Architecture Decision Records for top decisions |
+| # | Document | Description |
+|---|----------|-------------|
+| 10 | [CHANGELOG-design](10-CHANGELOG-design.md) | Deltas from Design Checkpoint, with rationale and post-review corrections |
 
 ---
 
 ## Traceability
 
-All service interfaces, event names, and API surfaces trace back to the [Commands & Events Catalog](../domain/docs/04-commands-and-domain-events.md) and [Bounded Contexts](../domain/docs/02-bounded-contexts-and-context-map.md) from the Design Checkpoint. Deltas are documented in [CHANGELOG-design.md](04-CHANGELOG-design.md).
+All service interfaces, event names, and API surfaces trace back to the [Commands & Events Catalog](../domain/docs/04-commands-and-domain-events.md) and [Bounded Contexts](../domain/docs/02-bounded-contexts-and-context-map.md) from the Design Checkpoint. Deltas are documented in [10-CHANGELOG-design.md](10-CHANGELOG-design.md).

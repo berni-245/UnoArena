@@ -85,7 +85,7 @@ The following components are **new** — they did not exist as explicit entities
 | `round-kickoff-worker` | The 100k simultaneous room fan-out at tournament start requires sharded, rate-limited workers to avoid overwhelming the broker and `room-service`. The Design Checkpoint modeled this as a single `CreateRound` command; the architecture splits execution into a sharded worker pool. | Spec §5 — Flow 2 Phase 2 (round execution); Spec §7.3 — Tournament Round Progression Saga |
 | `api-gateway` | Design assumed direct client-to-context communication. Architecture introduces a gateway for WebSocket/SSE termination, edge rate limiting, auth validation, and push-invalidation of superseded sessions. | Spec §7.6 — Rate Limiting; Spec §2.1.1 — Single-Active-Session Invariant |
 
-These deltas are tracked in [CHANGELOG-design.md](CHANGELOG-design.md).
+These deltas are tracked in [CHANGELOG-design.md](10-CHANGELOG-design.md).
 
 ---
 

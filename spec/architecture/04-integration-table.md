@@ -119,4 +119,4 @@ Every integration row above traces to named commands and events in the [Commands
 - **Synchronous endpoints** map to commands: `RegisterPlayer`, `Login`, `CreateRoom`, `JoinRoom`, `PlayCard`, `DrawCard`, `CallUno`, `CreateTournament`, `StartTournament`.
 - **Async events** match the published event catalog: `SessionInvalidated`, `GameCompleted`, `MatchCompleted`, `RoomCompleted`, `PlayerForfeited`, `TournamentRoomAssigned`, `PlayerAdvanced`, `EloUpdated`, etc.
 - **Timer events** map to design value objects: `UnoChallengeWindow`, `WildDrawFourChallengeWindow`, `ReconnectionWindow` (doc 03 §3.1.5).
-- Deltas from the Design Checkpoint are documented in [CHANGELOG-design.md](04-CHANGELOG-design.md).
+- Deltas from the Design Checkpoint are documented in [CHANGELOG-design.md](10-CHANGELOG-design.md).
