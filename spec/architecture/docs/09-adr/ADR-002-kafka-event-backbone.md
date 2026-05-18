@@ -5,7 +5,7 @@
 
 ## Context
 
-UnoArena has 6 bounded contexts that communicate primarily via domain events. Peak event rate is ~25,000 events/sec on the `gameplay.events` topic during the first tournament round (100k concurrent games). Events must be ordered per aggregate (per `gameId`), and multiple independent consumer groups must process the same events (spectator projection, ranking, audit, tournament).
+UnoArena has 6 bounded contexts that communicate primarily via domain events. Peak event rate is ~300,000 events/sec on the `gameplay.events` topic during the first tournament round (100k concurrent games × ~3 events/cmd × ~1 cmd/s per game; see capacity sketch §8.2.3). With 4 consumer groups the aggregate read rate reaches ~1,200,000 events/sec. Events must be ordered per aggregate (per `gameId`), and multiple independent consumer groups must process the same events (spectator projection, ranking, audit, tournament).
 
 ## Decision
 

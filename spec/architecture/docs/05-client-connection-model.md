@@ -170,6 +170,8 @@ data: {"currentPlayer":"P2","direction":"clockwise","timestamp":"..."}
 
 **Keepalive:** SSE comment (`: keepalive`) every 15 seconds to prevent proxy/load-balancer timeout.
 
+**Backpressure:** Each SSE connection has a bounded write buffer (64 KB). If a client falls behind (buffer full for > 5 seconds), the connection is terminated with a keepalive timeout. The client's `EventSource` auto-reconnects with `Last-Event-ID`, receiving a snapshot + delta from the materialized projection. This bounds per-connection memory to ~64 KB regardless of client speed, preventing slow clients from consuming unbounded server memory at scale.
+
 **Ordering:** Events are delivered in `aggregateSequence` order (inherited from Kafka partition ordering by `gameId`). `id` field enables `Last-Event-ID` reconnection.
 
 ---

@@ -12,7 +12,9 @@
 
 ## Summary: Did Any Design Edits Occur?
 
-**Yes.** After mapping the domain design to the concrete microservices architecture, sixteen distinct change clusters were identified across six bounded contexts. Of these, **twelve require actual edits to domain files** (new events, updated invariants, enriched payloads, new commands); **four are architecture-only decisions** that the domain already covers correctly at its level of abstraction — those entries document the delta without modifying domain files.
+**Yes.** Changes are grouped by bounded context, not numbered chronologically. The numbering gaps (e.g., 7 appearing after 20) reflect this grouping. All changes are accounted for in the per-context sections below.
+
+After mapping the domain design to the concrete microservices architecture, sixteen distinct change clusters were identified across six bounded contexts. Of these, **twelve require actual edits to domain files** (new events, updated invariants, enriched payloads, new commands); **four are architecture-only decisions** that the domain already covers correctly at its level of abstraction — those entries document the delta without modifying domain files.
 
 > **Principle applied throughout:** Domain documents express *what* must hold (invariants, events, commands, ubiquitous language). Architecture documents express *how* those guarantees are implemented (service names, table names, protocols, infrastructure patterns). Mixing infrastructure vocabulary into domain files pollutes the ubiquitous language and creates coupling to implementation choices that should remain free to evolve.
 
@@ -558,6 +560,67 @@ The following changes address deductions reported by the course evaluator on the
 | B | `03-aggregates.md` INV-R-12 | Deliverable 3 | -0.5 pts (Sequence number scope ambiguity) | INV-R-12 scoped to Room-level commands; INV-G-05 scoped to gameplay commands |
 | C | `06-edge-cases.md` §6.6.4 (new) | Deliverable 6 | -0.5 pts (Missing spectator scenario) | Added active-player-as-spectator edge case with invariant analysis |
 | D | `07-consistency.md` §7.3.5; `03-aggregates.md` INV-PR-05; `08-assumptions.md` A24 | Deliverable 7, 3, 8 | -1.0 pts (K-factor contradiction) | Variable K-factor (40/20/10) applied consistently across all three documents |
+
+---
+
+---
+
+## Part VIII — Post-Review Alignment (Spec Review Pass)
+
+### Change 21 — `GameAbandoned` and `MatchAbandoned` Removed as Separate Events (Merged into `GameCompleted` / `MatchCompleted`)
+
+**File:** `spec/domain/docs/04-commands-and-domain-events.md` — Section 4.3 (Room Gameplay events, former `GameAbandoned` and `MatchAbandoned` definitions)
+**File:** `spec/domain/docs/06-edge-cases-and-failure-paths.md` — Section 6.2.6, INV-A1, INV-A2
+
+**Deliverable:** *Deliverable 4 — Commands and domain events catalog* | *Deliverable 6 — Edge cases and failure paths*
+
+**Delta:** The domain design contained two redundant event definitions (`GameAbandoned`, `MatchAbandoned`) that coexisted with `GameCompleted { wasAbandoned: true }` and `MatchCompleted { wasAbandoned: true }` in the same catalog. This was an internal contradiction within the domain spec: INV-A2 stated these were "mutually exclusive" events, yet `GameCompleted` already carried the `wasAbandoned` boolean (added in Change 3 above) making the separate events unreachable. The architecture correctly uses only `GameCompleted` / `MatchCompleted` with the boolean discriminator.
+
+Changes made:
+- Removed `GameAbandoned` and `MatchAbandoned` event definitions from doc 04; replaced with a clarifying note pointing to the `wasAbandoned` field on their respective parent events.
+- Updated INV-A2 in doc 06 to describe the `wasAbandoned` field semantics rather than referencing a separate event type.
+- Updated the event flow in doc 06 §6.2.6 to emit `GameCompleted { wasAbandoned: true }` and `MatchCompleted { wasAbandoned: true }` instead of the removed event types.
+
+**Why:** The architecture publishes a single `GameCompleted` event on `gameplay.games` with `wasAbandoned` as the canonical discriminator. Downstream consumers (`ranking-service`, `tournament-service`) filter on this field. Having a second event type for the same terminal state would require all consumers to subscribe to two event types for the same aggregate lifecycle transition, adding complexity with no behavioral difference.
+
+**Non-negotiable confirmation:** The Elo-scope guarantee (abandoned casual games never update Elo) is unchanged — `ranking-service` checks `wasAbandoned == false` before computing Elo. Tournament forfeit-as-loss is unchanged — `tournament-service` treats `wasAbandoned: true` rooms as all-players-eliminated. INV-A1 (no Elo on abandonment) is preserved in its updated form.
+
+---
+
+### Change 22 — Domain Events Classified as Internal (Not Published to Kafka)
+
+**File:** `spec/domain/docs/04-commands-and-domain-events.md` — Section 4.3 (multiple events)
+**File:** `spec/domain/docs/06-edge-cases-and-failure-paths.md` — Sections 6.2, 6.4, 6.5, 6.6, 6.7
+
+**Deliverable:** *Deliverable 4 — Commands and domain events catalog* | *Deliverable 6 — Edge cases and failure paths*
+
+**Delta:** The following domain events exist in the domain catalog but have NO public Kafka topic assignment in the architecture. This is intentional — they are either **internal aggregate transitions** (not published outside the owning service), **subsumed by other events** (covered by Change 21), or **operational signals** (emitted as metrics/logs, not domain events). The classification:
+
+| Domain Event | Architecture Status | Rationale |
+|-------------|-------------------|-----------|
+| `GameAbandoned` | **Removed** (Change 21) | Subsumed by `GameCompleted { wasAbandoned: true }` |
+| `MatchAbandoned` | **Removed** (Change 21) | Subsumed by `MatchCompleted { wasAbandoned: true }` |
+| `ReconnectionTimerStarted` | **Internal to game-engine** | The `PlayerDisconnected` event (published on `gameplay.events`) implicitly signals timer start. Timer creation is a persistence detail (`timer_deadlines` table), not a cross-context event. |
+| `ReconnectionTimerExpired` | **Internal to game-engine** | Consumed only by `game-engine` itself (via `timer-service` fire). The downstream-visible effect is `PlayerForfeited { reason: "reconnection_timeout" }` which IS published. |
+| `ReconnectionTimerCancelled` | **Internal to game-engine** | Consumed only by timer-service for cleanup. The downstream-visible effect is `PlayerReconnected` which IS published. |
+| `BetweenRoundReconnectionWindowStarted` | **Internal to tournament-service** | Timer managed within tournament round transition; no external consumer. See Change 23 for the architectural mechanism. |
+| `BetweenRoundReconnectionWindowExpired` | **Internal to tournament-service** | Results in `PlayerEliminated { reason: "failed_to_join" }` which IS published on `tournament.lifecycle`. |
+| `RoomCreationFailed` | **Operational signal** | Emitted as a structured log + metric (`kickoff_dlq_depth_current`). Not a domain event — it triggers a retry, not a state transition. After retries exhaust, the DLQ entry and eventual `ForceResolveTimedOutRoom` are the visible outcomes. |
+| `RoomCreationEscalated` | **Operational signal** | Same as above — metric/alert, not a published domain event. |
+| `SecurityAlertRaised` | **Operational signal** | Observability metric (`audit_signature_failures_total`, alert runbook). Not a domain event on Kafka. |
+| `SuspiciousTimingPattern` | **Operational signal** | Observability metric. Anti-cheat pipeline consumes from game log directly, not via Kafka events. |
+| `BracketIntegrityViolationDetected` | **Operational signal** | Alert for tournament integrity monitoring. Not a domain event. |
+| `PrivacyViolation` | **Operational signal** | High-severity alert triggering projection rebuild. Not published to Kafka. |
+| `DrawPileExhausted` | **Internal to game-engine** | Immediately triggers `DrawPileReshuffled` (published) or `DrawSkipped`. No consumer needs to see the intermediate state. |
+| `DrawSkipped` | **Internal to game-engine** | Degenerate case (no cards anywhere). Turn simply advances. `TurnAdvanced` (published) is the visible effect. |
+| `InitialCardRejected` | **Internal to game-engine** | Triggers re-flip. `FirstCardFlipped` (published) shows only the final valid card. No consumer needs to see failed attempts. |
+| `HandRemoved` | **Internal to game-engine** | Part of forfeit processing. `PlayerForfeited` (published) is the visible effect. Hand removal is a persistence detail. |
+| `MalformedEventDiscarded` | **Operational signal** | Consumer-side metric (`audit_malformed_events_total`). Not a domain event. |
+| `DuplicateEventIgnored` | **Operational signal** | Consumer-side metric (`audit_duplicate_events_discarded_total`). Not a domain event. |
+
+**Why:** The architecture distinguishes between **cross-context domain events** (published to Kafka for consumption by other bounded contexts) and **internal aggregate transitions** or **operational signals** (metrics, logs, alerts). Publishing internal transitions would violate encapsulation and create unnecessary coupling. Each internal event listed above has a corresponding published event that communicates the externally-visible outcome.
+
+**Non-negotiable confirmation:** All domain invariants are preserved. The timer events' guarantees (durability, idempotency, crash recovery) are implemented via the `timer_deadlines` table and `timer-service` mechanism documented in room-gameplay.md §Timer Ownership. The operational signals are captured via the observability architecture (doc 13).
 
 ---
 

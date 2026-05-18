@@ -16,6 +16,7 @@ sequenceDiagram
     participant KW as round-kickoff-worker<br/>(Tournament Orchestration)
     participant RK as ranking-service<br/>(Ranking & Statistics)
     participant SP as spectator-projection<br/>(Spectator View)
+    participant AS as audit-service<br/>(Audit & Game Log)
 
     alt HAPPY PATH: Tournament game completed normally (wasAbandoned: false)
         Note over GE: Player empties hand → Game Over
@@ -51,6 +52,9 @@ sequenceDiagram
     and spectator-projection: Game Update
         K->>SP: GameCompleted
         SP->>SP: Update SpectatorGameProjection<br/>gamePhase → "completed"<br/>Strip final hand contents
+    and audit-service: Audit Ingestion
+        K->>AS: GameCompleted<br/>from gameplay.games + gameplay.audit
+        AS->>AS: Verify HMAC signature<br/>Append to game_log + audit_trail<br/>Deduplicate via eventId in processed_events
     end
 
     Note over TS: Tournament Round Progression
@@ -111,7 +115,7 @@ sequenceDiagram
 
 ### Cross-Context Data Flow
 
-This diagram shows **four bounded contexts** processing the same originating event (`GameCompleted`) independently and asynchronously:
+This diagram shows **five bounded contexts** processing the same originating event (`GameCompleted`) independently and asynchronously:
 
 1. **Room Gameplay (room-service):** Evaluates match series. If a player has 2 wins in a best-of-3 (2-player room), early termination occurs. Otherwise, the next game in the series is initiated. Only after the match series completes does `MatchCompleted` and `RoomCompleted` flow to tournament-service.
 
@@ -124,6 +128,8 @@ This diagram shows **four bounded contexts** processing the same originating eve
 3. **Spectator View:** Updates game projection to completed state, stripping final hand contents.
 
 4. **Tournament Orchestration:** Processes `RoomCompleted` (not `GameCompleted` — it waits for the full match series to finish). The atomic completion counter synchronizes round transitions.
+
+5. **Audit & Game Log (audit-service):** Consumes `GameCompleted` from both `gameplay.games` (public outcome) and `gameplay.audit` (full hand/seed detail). Verifies HMAC signatures, deduplicates via `eventId` in `processed_events`, and appends to `game_log` + `audit_trail`. This consumption runs in parallel with the other four contexts.
 
 ### Completion Counter Synchronization
 

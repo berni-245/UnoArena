@@ -56,6 +56,8 @@ Each `game-engine` instance handles ~500 commands/sec. PostgreSQL write per comm
 - **Warm-up on rolling restart:** When a `game-engine` instance restarts, it must rebuild aggregates for all games in its `gameId` shard range. At 500 games × ~900 events average × 1 KB = ~450 MB of event data per instance, read from the shard's PostgreSQL primary. At 100 MB/s sequential read throughput (cloud storage), warm-up takes ~4.5 s per instance. During warm-up, commands for games not yet loaded fall back to the event-store replay path (adds ~10–30 ms per command). Rolling restarts (one instance at a time) keep aggregate command throughput above 95% during this brief window.
 - **Read load during warm-up:** 450 MB per instance read from the shard primary on restart. With 200 instances and a 30-instance rolling-restart window (15% rolling batch), this adds ~30 instances × ~100 MB/s = ~3 GB/s read burst to the shard primaries for ~4.5 s. This is a recognized warm-up read spike that operators should schedule during off-peak hours or use read replicas for.
 
+**Note:** At tournament start, new games have zero event history, so aggregate warm-up cost is effectively zero. The warm-up analysis above applies to rolling restarts of game-engine instances during mid-tournament play (when games are in progress with ~900 events each). At T=0 kickoff, the primary load is concurrent aggregate *creation* (500 new empty games per instance in ~5 seconds), which is bounded by PostgreSQL INSERT throughput, not event-replay I/O.
+
 ### 8.2.3 Event Production Rate (game-engine → Kafka)
 
 | Metric | Value | Derivation |
@@ -106,6 +108,8 @@ Each consumer group reads the full topic independently:
 | Timer fire rate (steady state) | ~1,700/s | Turn timers: ~1/game/10s = ~10k/10 = ~1k. Challenge windows: 500 fires/5s = 100/s. Reconnection: rare. |
 
 **Deadline-bucket sharding scheme:** Each `timer_deadlines` row carries a `shard_id = gameId % 10` column (written by `game-engine` at INSERT time). Timer-service instance `i` polls only `WHERE shard_id = i AND expiresAt <= now() AND fired = false ORDER BY expiresAt LIMIT 1000`. A composite index on `(shard_id, fired, expiresAt)` makes each poll an efficient range scan of ≤ 10k rows returning 0–50 expired entries in steady state. This eliminates cross-instance contention; `SKIP LOCKED` is a safety net for transient overlap during rolling restarts, not the primary concurrency mechanism. The shard scheme aligns with the RG DB shard-by-`gameId` layout (§8.2.2): each timer-service instance naturally co-locates with the game-engine instances on the same `gameId` range shard, keeping poll queries on the local shard primary and avoiding cross-shard reads.
+
+**Combined poll load analysis:** Outbox relay at 20 polls/s/instance x 200 instances = 4,000 polls/s + timer-service at 10 polls/s/instance x 10 instances = 100 polls/s = ~4,100 lightweight SELECT queries/s. Both use composite indexes (`outbox(delivered, created_at)` and `timer_deadlines(shard_id, fired, expiresAt)`) with LIMIT clauses, returning 0-50 rows each. At 4.1k queries/s across 4 RG shards, each shard handles ~1,025 poll queries/s -- well within PostgreSQL's index-scan capacity (~50k simple SELECTs/s per shard). No contention concern.
 
 ---
 
@@ -215,7 +219,7 @@ Games within a round don't finish simultaneously — game durations vary (~5–2
 | `ranking-service` | 20 | Elo updates at round end (~8k/s) | Consumer group partitions | None |
 | `spectator-projection-service` | 30 | Event consumption + projection writes (25k/s) | Consumer group partitions + read replicas | None |
 | `audit-service` | 10 | Append-only ingestion (~30k/s) | Consumer group partitions, batch inserts | None |
-| **Kafka** | 5 brokers | 25 MB/s write, 100 MB/s read | Add brokers, increase partitions | None (clustered) |
+| **Kafka** | 5+ brokers | ~300 MB/s aggregate write, ~1,200 MB/s aggregate read (4× consumer fan-out); ~60 MB/s write per broker and ~240 MB/s read per broker with 5 brokers (see §8.2.3–8.2.4) | Add brokers, increase partitions (≥256 on `gameplay.events`) | None (clustered) |
 | **PostgreSQL (RG)** | 4 (primary shard + 2 replicas each) for the 1M-player tournament profile; ≥ 8 for the 2M total-player capacity from §8.7 | 100k writes/s | Horizontal write sharding by `gameId` range (each shard owns a contiguous `gameId` range; `game-engine` instances route writes to their shard's primary). At 1M-player tournament scale, 4 shards × ~25k writes/s each sits well within cloud PostgreSQL limits (provisioned IOPS io2, 32k IOPS per shard) and below the ~50k writes/s/shard fsync ceiling. The single-shard mode is reserved for **casual-only** deployments at ≤ 50k concurrent games. Tournament-capable deployments come up with 4+ shards from day one. | Write sharding is the deployed topology, not a future activation; partition affinity at the service layer (each `game-engine` instance is pinned to a `gameId` range) makes routing deterministic without distributed transactions. |
 | **Redis** | 3–6 (cluster) | 1M+ reads/s (session cache) | Cluster sharding | None (clustered) |
 

@@ -33,6 +33,8 @@
 | `/api/v1/sessions/{sessionId}` | DELETE | Bearer JWT | Logout — invalidates session | `Logout` |
 | `/api/v1/sessions/{sessionId}` | DELETE | Admin JWT | Admin force-invalidate | `InvalidateSession` |
 | `/api/v1/sessions/validate` | POST | Internal (mTLS) | Token introspection for gateway. Returns `{valid, playerId, sessionId, expiresAt}`. | (Query, no design command) |
+| `/api/v1/players/{playerId}/password` | PUT | Bearer JWT (owner) | Change password. Requires current password verification. Invalidates all active sessions on success. | `ChangePassword` |
+| `/api/v1/players/{playerId}/display-name` | PUT | Bearer JWT (owner) | Update display name. Enforces uniqueness (INV-PI-01). | `UpdateDisplayName` |
 
 **Versioning:** URL-path versioned (`/v1/`). Breaking changes get a new version; old version deprecated with sunset header.
 
@@ -146,6 +148,7 @@ Revoking a token in the database is insufficient. The old session may hold a liv
 2. **Push to gateway** — `api-gateway` subscribes to `identity.sessions` topic, maintains an in-memory `sessionId → connectionRef` map. On `SessionInvalidated`, looks up the old session's connection and sends a WebSocket close frame (code 4001: "session_superseded") or terminates the SSE stream.
 3. **Push to game-engine** — `game-engine` also subscribes. If the player is mid-game, emits `PlayerDisconnected` and starts the 60-second reconnection timer. Since the session is now invalid, any reconnect attempt with the old token will fail → timer expires → `PlayerForfeited`.
 4. **Latency** — typical Kafka consumer lag: 50–200ms. The old connection is closed within ~200ms of the new login TX commit.
+   - **Risk acceptance for the ~200ms gap window:** This 200ms window is accepted because: (1) commands issued during this window are legitimate game actions from a formerly-valid session — they do not grant new capabilities; (2) the window is bounded by Kafka consumer lag SLO (< 200ms p95); (3) for targeted session-takeover scenarios, the attacker already had the token before invalidation, meaning the brief window does not widen the attack surface beyond what existed pre-invalidation.
 5. **Gateway crash recovery** — if the gateway instance holding the old connection crashes before processing the `SessionInvalidated` event, the client's TCP connection dies anyway. On reconnect, the client must present a valid session token — the old token is already invalidated in DB.
 
 ### Per-Session Command Validation
@@ -184,6 +187,8 @@ This makes the single-active-session invariant authoritative on every in-flight 
 |-------|-----------|------|-------------|
 | Primary | PostgreSQL | `player_identities` (credentials, display names, status), `sessions` (sessionId, playerId, status, expiresAt, deviceFingerprint) | Strong (SERIALIZABLE for session CAS) |
 | Cache | Redis | Hot session tokens for gateway validation. TTL = session expiry. Invalidated on `SessionInvalidated`. | Eventual (write-through from identity-service, invalidate on event) |
+
+**`deviceFingerprint` lifecycle:** The `deviceFingerprint` column in the `sessions` table is captured during `Login` (session creation). It is composed from the `User-Agent` header and client-provided metadata (screen resolution, timezone, platform identifier) submitted in the login request body. Its purpose is **forensic correlation for security investigations** — specifically, detecting multi-device session theft patterns (e.g., a session token appearing on a device fingerprint that differs from the one used at login). It is **not** used for authentication or authorization decisions; a mismatched fingerprint does not block commands or invalidate sessions. It is queryable by operators via the audit API for post-incident analysis.
 
 **Idempotency store:** `command_idempotency` table (commandId → response, TTL 24h). Checked before any command processing.
 

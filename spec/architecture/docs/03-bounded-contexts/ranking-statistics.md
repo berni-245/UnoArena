@@ -6,9 +6,9 @@
 
 ## Purpose and Scope
 
-**Owns:** Elo rating system (global, casual-only), player statistics (all game types), leaderboard projections, and historical rating aggregation.
+**Owns:** Elo rating system (global, casual-only), Tournament Placement Rating computation and storage (TPR — updated on `TournamentCompleted`; formula TBD per A42, stored in `PlayerRating.tournamentPlacementRating`; see INV-PR-08), player statistics (all game types), leaderboard projections, and historical rating aggregation.
 
-**Does not own:** Tournament-placement rating (TPR — owned by Tournament Orchestration), game outcomes (owned by Room Gameplay), player identity.
+**Does not own:** Tournament lifecycle or placements (owned by Tournament Orchestration — TO produces the input data), game outcomes (owned by Room Gameplay), player identity.
 
 ---
 

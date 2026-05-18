@@ -6,9 +6,9 @@
 
 ## Purpose and Scope
 
-**Owns:** Tournament lifecycle (draft → registration_open → in_progress → completed/cancelled), player registration, round management, player-to-room distribution, advancement logic (top 3 per room, tiebreak by card points then completion time), final-room creation (≤10 remaining players), tournament-placement rating (TPR), and completion counters.
+**Owns:** Tournament lifecycle (draft → registration_open → in_progress → completed/cancelled), player registration, round management, player-to-room distribution, advancement logic (top 3 per room, tiebreak by card points then completion time), final-room creation (≤10 remaining players), and completion counters. Produces the `TournamentCompleted` event with final placements that feeds the TPR computation downstream.
 
-**Does not own:** Uno game rules, match gameplay, Elo rating, room/game state machines.
+**Does not own:** Uno game rules, match gameplay, Elo rating, TPR computation or storage (owned by Ranking & Statistics — see INV-PR-08), room/game state machines.
 
 ---
 
@@ -41,7 +41,19 @@ The first-round surge (~100k rooms, ~1M players) is a unique scaling challenge d
 | `/api/v1/tournaments/{id}/start` | POST | Organizer JWT | Start tournament | `StartTournament` |
 | `/api/v1/tournaments/{id}` | GET | Bearer JWT | Tournament status, current round | (Query) |
 | `/api/v1/tournaments/{id}/bracket` | GET | Public | Bracket progression | (Query, served by spectator-projection-service) |
-| `/api/v1/tournaments/{id}/rounds/{roundId}/force-resolve` | POST | Admin JWT | Force-resolve timed-out rooms | `ForceResolveTimedOutRoom` |
+| `/api/v1/tournaments/{id}/rounds/{roundId}/force-resolve` | POST | Admin JWT OR Organizer JWT | Force-resolve timed-out rooms | `ForceResolveTimedOutRoom` |
+| `/api/v1/tournaments/{id}/close-registration` | POST | Organizer JWT | Close registration manually (alternative to automatic close on StartTournament) | `CloseRegistration` |
+| `/api/v1/tournaments/{id}/cancel` | POST | Organizer JWT or Admin JWT | Cancel tournament | `CancelTournament` |
+
+> **Auth for ForceResolveTimedOutRoom:** Admin JWT (any tournament) OR Organizer JWT (only tournaments where `organizerId` matches the JWT's `playerId`). This allows organizers to self-service stuck rooms in their own tournaments without admin escalation.
+
+> **Design decision (T-03 — KickPlayer):** The `KickPlayer` command from the domain catalog is not applicable to tournament rooms (players are system-assigned by the round-kickoff process and cannot be manually removed by a host). For casual rooms, player departure is handled via `LeaveRoom` (already documented in room-gameplay.md). `ForceResolveRoom` is mapped as S16 in the integration table (`ForceResolveTimedOutRoom` endpoint above).
+
+**CancelTournament flow:**
+- **Valid states:** `registration_open`, `in_progress`. Rejected if already `completed` or `cancelled` (409).
+- **Registration-open cancellation:** Immediately transitions to `cancelled`. Emits `TournamentCancelled { tournamentId, reason, cancelledAt }` on `tournament.lifecycle`. All `tournament_registrations` rows for this tournament are marked `cancelled`. No rooms to clean up.
+- **In-progress cancellation:** Transitions to `cancelled`. Emits `TournamentCancelled`. **In-progress rooms are NOT force-terminated** — they complete naturally (players finish their current games). However, no further rounds are created: the round-advancement saga checks tournament status before creating the next round and stops if `cancelled`. The `TournamentCancelled` event is consumed by `spectator-projection-service` to update the bracket display.
+- **Compensation:** No Elo reversal needed (tournament games don't affect Elo). No room teardown needed (rooms complete naturally). Players' `active_player_rooms` rows are cleared when their current room completes normally.
 
 ### Asynchronous (Kafka)
 
@@ -49,7 +61,7 @@ The first-round surge (~100k rooms, ~1M players) is a unique scaling challenge d
 
 | Topic | Event(s) | Partition Key | Description |
 |-------|----------|---------------|-------------|
-| `tournament.lifecycle` | `TournamentCreated`, `RegistrationOpened`, `TournamentStarted`, `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `AllMatchesInRoundCompleted`, `TournamentCompleted` | `tournamentId` | All tournament state transitions. Consumed by `spectator-projection-service` (bracket) and `audit-service`. |
+| `tournament.lifecycle` | `TournamentCreated`, `RegistrationOpened`, `TournamentStarted`, `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `AllMatchesInRoundCompleted`, `TournamentCompleted`, `TournamentCancelled` | `tournamentId` | All tournament state transitions. Consumed by `spectator-projection-service` (bracket) and `audit-service`. |
 | `tournament.rooms` | `TournamentRoomAssigned` | `roomId` | Room creation commands for `room-service`. High burst at round start. Produced by `round-kickoff-worker`. |
 
 **Consumed:**
@@ -67,7 +79,7 @@ The first-round surge (~100k rooms, ~1M players) is a unique scaling challenge d
 
 | Interface | Description |
 |-----------|-------------|
-| `tournament-service` → `round-kickoff-worker` | Internal work queue (Kafka topic `tournament.kickoff-work` or Redis list). Each work item: `{ tournamentId, roundId, roomAssignment: { roomId, playerIds[], roomConfig } }`. |
+| `tournament-service` → `round-kickoff-worker` | Internal work queue (Kafka topic `tournament.kickoff-work`). Each work item: `{ tournamentId, roundId, roomAssignment: { roomId, playerIds[], roomConfig } }`. Technology: Kafka (per ADR-006); no Redis list alternative. |
 | Completion counter | Atomic counter in PostgreSQL: `UPDATE tournament_rounds SET completed_rooms = completed_rooms + 1 WHERE roundId = ? RETURNING completed_rooms`. Compared against `total_rooms` to detect round completion. |
 
 ---
@@ -229,3 +241,71 @@ The `tournament-service` consumer group for `gameplay.rooms` topic absorbs this 
 | Kickoff queue | Kafka topic `tournament.kickoff-work` | Work items for round-kickoff-worker | At-least-once delivery |
 
 **Idempotency store:** `processed_events` table (eventId → timestamp). Checked before processing any consumed event.
+
+---
+
+## Between-Round Reconnection Window
+
+**Owner:** `tournament-service`
+
+### Problem
+
+When a new tournament round begins and players are assigned to rooms, some players may be temporarily disconnected or slow to rejoin. The system must enforce a bounded deadline for players to join their assigned room — otherwise a single absent player blocks an entire room from starting.
+
+### Mechanism
+
+1. When `TournamentRoundCreated` is emitted and `TournamentRoomAssigned` events are published, `tournament-service` sets a **per-player deadline of 60 seconds** from room assignment.
+2. If the player's `PlayerJoinedRoom` event (consumed from `gameplay.rooms`) is **not received within 60 seconds** of assignment, `tournament-service` emits `PlayerEliminated { playerId, tournamentId, roundId, reason: "failed_to_join" }`.
+3. The room proceeds with fewer players (minimum 2; if below minimum, room is resolved with remaining players advancing by default).
+
+### Persistence — `round_join_deadlines` Table
+
+```sql
+CREATE TABLE round_join_deadlines (
+    tournament_id   UUID NOT NULL,
+    round_id        UUID NOT NULL,
+    player_id       UUID NOT NULL,
+    room_id         UUID NOT NULL,
+    assigned_at     TIMESTAMPTZ NOT NULL,
+    joined_at       TIMESTAMPTZ,          -- NULL until PlayerJoinedRoom received
+    expires_at      TIMESTAMPTZ NOT NULL,  -- assigned_at + 60s
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending | joined | expired
+    PRIMARY KEY (tournament_id, round_id, player_id)
+);
+
+CREATE INDEX idx_pending_deadlines ON round_join_deadlines (expires_at)
+    WHERE status = 'pending';
+```
+
+### Expiry Detection
+
+A background poll (similar to `timer-service` pattern) runs within `tournament-service`:
+
+```
+Every 1 second:
+  SELECT * FROM round_join_deadlines
+  WHERE status = 'pending' AND expires_at <= now()
+  LIMIT 100;
+
+  For each expired row:
+    UPDATE round_join_deadlines SET status = 'expired' WHERE ... AND status = 'pending';
+    IF rows_affected == 1:
+      Emit PlayerEliminated { reason: "failed_to_join" }
+```
+
+### Crash Recovery
+
+Deadlines are persisted in PostgreSQL. If `tournament-service` crashes and restarts:
+- The background poll resumes and immediately picks up any deadlines that expired during downtime.
+- `PlayerJoinedRoom` events that arrived during the crash window are replayed from the Kafka consumer group's last committed offset.
+- If a `PlayerJoinedRoom` event is processed after the deadline was already marked `expired`, the elimination stands (see Idempotency below).
+
+### Idempotency
+
+- If `PlayerJoinedRoom` arrives **before** the deadline: row is updated to `status = 'joined'`, `joined_at = now()`. No elimination.
+- If `PlayerJoinedRoom` arrives **after** the deadline has expired and `PlayerEliminated` has been emitted: the elimination is **irreversible**. The late join is logged but does not reverse the elimination. This prevents race conditions and ensures deterministic tournament progression.
+- Duplicate `PlayerJoinedRoom` events are safe: the UPDATE is idempotent (status transition `pending → joined` only; `joined → joined` is a no-op).
+
+---
+
+**Single-tournament-per-player enforcement (INV-T-09):** The `tournament_registrations` table has a UNIQUE constraint on `(playerId)` scoped to tournaments in `registration_open` or `in_progress` status. Implemented as a partial unique index: `CREATE UNIQUE INDEX idx_active_tournament_player ON tournament_registrations (playerId) WHERE status IN ('registered', 'active')`. On `RegisterForTournament`, the INSERT fails if the player is already registered/active in another tournament. Rows transition to `eliminated` or `completed` status when the player is eliminated or the tournament ends, freeing the slot.

@@ -37,6 +37,11 @@ sequenceDiagram
         GE->>DB: INSERT INTO game_events<br/>(gameId, seq=42, type='CardPlayed',<br/>payload, signature)
         GE->>DB: INSERT INTO outbox<br/>(eventId, topic='gameplay.events',<br/>partitionKey=gameId, payload, delivered=false)
         GE->>DB: INSERT INTO command_idempotency<br/>(commandId='cmd-abc', gameId, response)
+        opt Card is penultimate (hand size → 1): opens Uno challenge window
+            GE->>DB: INSERT INTO game_events<br/>(gameId, seq=43, type='UnoChallengeWindowOpened',<br/>payload, signature)
+            GE->>DB: INSERT INTO outbox<br/>(eventId, topic='gameplay.events',<br/>partitionKey=gameId, payload)
+            GE->>DB: INSERT INTO timer_deadlines<br/>(deadlineId=windowId, gameId,<br/>type='uno_challenge',<br/>expiresAt=now()+5s, version=1, fired=false)
+        end
         Note over GE,DB: ═══ COMMIT ═══
     end
 
@@ -88,3 +93,54 @@ Direct Kafka produce cannot be made atomic with the PostgreSQL event store write
 2. **Kafka succeeds, DB commit fails:** Event is broadcast but never logged (violates log-before-broadcast).
 
 The transactional outbox eliminates both: the outbox row and event store row are in the **same TX**. The relay worker handles Kafka publication asynchronously with at-least-once semantics.
+
+---
+
+## Two-Channel Publication for `GameCompleted` (gameplay.audit Topic Path)
+
+When a game ends, `game-engine` produces a `GameCompleted` event that is published to **two** Kafka topics via the transactional outbox:
+
+| Topic | Audience | Payload |
+|-------|----------|---------|
+| `gameplay.games` | Public consumers (`spectator-projection-service`, `ranking-service`, `tournament-service`) | Standard `GameCompleted` payload: placements, match scores, duration. **No** private data (no hand contents, no deck seed). |
+| `gameplay.audit` | `audit-service` only (privileged consumer group) | Full `GameCompleted` payload **plus** audit-privileged fields: `finalHands` (each player's remaining hand at game end), `shuffleSeed` (the PRNG seed used for deck initialization), `deckOrdering` (the full initial deck order for deterministic replay verification). |
+
+### Sequence (within the same COMMIT as the final game event)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GE as game-engine
+    participant DB as PostgreSQL<br/>(event store + outbox)
+    participant OR as Outbox Relay
+    participant K1 as Kafka<br/>(gameplay.games)
+    participant K2 as Kafka<br/>(gameplay.audit)
+    participant SP as spectator-projection<br/>-service
+    participant AU as audit-service
+
+    Note over GE: Game ends (last card played or all others forfeited)
+    rect rgb(220, 245, 220)
+        Note over GE,DB: ═══ BEGIN TRANSACTION ═══
+        GE->>DB: INSERT INTO game_events<br/>(gameId, seq=N, type='GameCompleted',<br/>payload, signature)
+        GE->>DB: INSERT INTO outbox<br/>(eventId, topic='gameplay.games',<br/>key=gameId, payload=publicPayload)
+        GE->>DB: INSERT INTO outbox<br/>(eventId, topic='gameplay.audit',<br/>key=gameId, payload=fullAuditPayload)
+        Note over GE,DB: ═══ COMMIT ═══
+    end
+
+    Note over OR: Outbox relay picks up both rows
+    OR->>K1: Produce GameCompleted (public)<br/>topic: gameplay.games
+    OR->>K2: Produce GameCompleted (audit)<br/>topic: gameplay.audit
+
+    par Public consumers
+        K1->>SP: GameCompleted (consumer group: spectator)
+        SP->>SP: Update projection to completed state
+    and Audit consumer
+        K2->>AU: GameCompleted + finalHands + shuffleSeed + deckOrdering
+        AU->>AU: Verify HMAC-SHA256 signature
+        AU->>AU: Store full game record for<br/>deterministic replay verification
+    end
+```
+
+### Why Two Topics (Not Field-Level Filtering)
+
+The `gameplay.audit` topic carries events with security-sensitive fields (`shuffleSeed`, `deckOrdering`, `finalHands`) that must never be exposed to public consumers. Topic-level separation ensures that even a misconfigured consumer group cannot accidentally receive privileged data — Kafka ACLs restrict `gameplay.audit` consumption to the `audit-service` principal only. This is defense-in-depth: the data never enters a topic that public consumers subscribe to.

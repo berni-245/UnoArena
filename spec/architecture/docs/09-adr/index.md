@@ -12,3 +12,5 @@
 | [ADR-006](ADR-006-sharded-round-kickoff-worker.md) | Sharded Round-Kickoff Worker for Tournament Surge | Accepted |
 | [ADR-007](ADR-007-spectator-projection-bounded-context.md) | Spectator Projection as First-Class Bounded Context | Accepted |
 | [ADR-008](ADR-008-api-gateway-edge-security.md) | API Gateway for Connection Termination and Edge Security | Accepted |
+| [ADR-009](ADR-009-gdpr-pseudonymisation.md) | GDPR Pseudonymisation for Immutable Event Logs | Accepted |
+| [ADR-010](ADR-010-kafka-partition-count.md) | Kafka Partition Count Sizing | Accepted |

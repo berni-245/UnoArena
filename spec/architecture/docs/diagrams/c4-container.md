@@ -45,7 +45,8 @@ flowchart TB
 
     subgraph SV["Spectator View"]
         SP["spectator-projection-service<br/>─────────────<br/>• ACL privacy filter<br/>• Read model materialization<br/>• Lobby, brackets<br/>• SSE feed"]
-        SV_DB[("SV PostgreSQL/MongoDB<br/>spectator projections,<br/>lobby, brackets")]
+        REP["regional-edge-proxy<br/>─────────────<br/>• SSE fan-out (1:10k)<br/>• Auto-activated >1k spectators/room<br/>��� Last-Event-ID reconnection<br/>• Per-IP rate limiting"]
+        SV_DB[("SV PostgreSQL (JSONB)<br/>spectator projections,<br/>lobby, brackets")]
     end
 
     subgraph AL["Audit & Game Log"]
@@ -54,7 +55,7 @@ flowchart TB
     end
 
     subgraph Infra["Shared Infrastructure"]
-        KAFKA{{"Kafka<br/>Event Backbone<br/>─────────────<br/>identity.sessions<br/>gameplay.events<br/>gameplay.games<br/>gameplay.rooms<br/>tournament.lifecycle<br/>tournament.rooms<br/>ranking.updates"}}
+        KAFKA{{"Kafka<br/>Event Backbone<br/>─────────────<br/>identity.sessions<br/>gameplay.events<br/>gameplay.games<br/>gameplay.rooms<br/>gameplay.audit<br/>tournament.lifecycle<br/>tournament.rooms<br/>tournament.kickoff-work<br/>tournament.rooms.dlq<br/>ranking.updates"}}
     end
 
     %% Client → Gateway
@@ -69,6 +70,8 @@ flowchart TB
     GW -- "REST: tournament mgmt" --> TO_SVC
     GW -- "REST: leaderboard" --> RK_SVC
     GW -- "REST/SSE: spectator" --> SP
+    GW -- "SSE: high-fan-out rooms" --> REP
+    REP -- "1 upstream SSE per game" --> SP
     GW -- "REST: audit queries" --> AU
 
     %% Identity flows

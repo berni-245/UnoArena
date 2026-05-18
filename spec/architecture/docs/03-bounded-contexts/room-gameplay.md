@@ -61,6 +61,8 @@ Once a game is in progress, the player's WebSocket connection carries both comma
 
 **Sequence numbers:** Every gameplay command from the client must include `sequenceNumber` (except `CallUno`, `ChallengeUnoCall`, `ChallengeWildDrawFour` — time-sensitive, no seq required). The `game-engine` rejects stale sequence numbers with a `command_rejected` WebSocket frame: `{ type: "command_rejected", commandId, reason: "stale_sequence_number", expected: N }`. The client reconciles state from the event stream and retries.
 
+> **Note (T-04 — Sequence number scope):** Room-level commands (`JoinRoom`, `LeaveRoom`, `StartMatch`, `ForfeitGame`) use REST with `commandId`-based idempotency (not sequence numbers). The domain's INV-R-12 (Room-level sequence numbers) is implemented at the architecture level via `commandId` idempotency + HTTP 409 on state conflicts, rather than client-maintained sequence numbers. This is because Room commands are low-frequency (seconds between calls) and state conflicts are detected server-side via room status checks (e.g., joining an in_progress room returns 409). Sequence numbers are reserved for the high-frequency WebSocket gameplay path where sub-second ordering is critical.
+
 ### Asynchronous (Kafka)
 
 **Produced:**
@@ -69,7 +71,7 @@ Once a game is in progress, the player's WebSocket connection carries both comma
 |-------|----------|---------------|-----------------|
 | `gameplay.events` | `CardPlayed`, `CardDrawn`, `TurnAdvanced`, `TurnPassed`, `DirectionReversed`, `PlayerSkipped`, `ColorChosen`, `UnoCallMade`, `UnoChallengeWindowOpened`, `ChallengeMade`, `ChallengeResolved`, `PenaltyCardsDrawn`, `UnoChallengeWindowClosed`, `WildDrawFourChallengeWindowOpened`, `WildDrawFourChallengeMade`, `WildDrawFourChallengeResolved`, `WildDrawFourChallengeWindowClosed`, `PlayerDisconnected`, `PlayerReconnected`, `PlayerForfeited`, `TurnSkippedDueToDisconnection`, `TurnTimedOut`, `DrawPileReshuffled`, `DeckInitialized`, `InitialHandsDealt`, `FirstCardFlipped`, `GameStarted` | `gameId` | `eventId` |
 | `gameplay.games` | `GameCompleted` | `gameId` | `eventId` |
-| `gameplay.rooms` | `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `MatchGameStarted`, `MatchGameCompleted`, `MatchCompleted`, `RoomCompleted` | `roomId` | `eventId` |
+| `gameplay.rooms` | `RoomCreated`, `RoomKeyEstablished`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `MatchGameStarted`, `MatchGameCompleted`, `MatchCompleted`, `RoomCompleted` | `roomId` | `eventId` |
 
 **Room-lifecycle event semantics:**
 
@@ -80,6 +82,8 @@ Once a game is in progress, the player's WebSocket connection carries both comma
 | `PlayerLeftRoom` | `room-service` | A player leaves a room in `waiting` state via `LeaveRoom`. Not emitted once a match has started (in-game departures are modeled as `PlayerDisconnected`/`PlayerForfeited` on `gameplay.events`). | `roomId, playerId, leftAt, currentSlots` |
 | `RoomFilled` | `room-service` | The room reaches `maxPlayers` and transitions `waiting → ready`. Consumed by the lobby projection to remove the room from the public listing. | `roomId, filledAt, players[]` |
 | `MatchGameStarted` | `room-service` | Emitted immediately after `room-service` issues the `InitializeGame` internal RPC to `game-engine` (S10). Provides an audit-trail anchor for "game N in match M started" without relying on the internal RPC trace. Consumers: `audit-service` (correlation). | `matchId, roomId, gameId, gameNumber, startedAt` |
+
+> **Note (T-02):** `MatchGameStarted` is an **audit-trail-only anchor event**. Its sole explicit consumer is `audit-service`, which receives it via its universal `gameplay.rooms` subscription. The event exists to provide a traceable correlation between match series state and individual game lifecycle events in the audit trail — no other service reacts to it or depends on it for state transitions.
 | `MatchGameCompleted` | `room-service` | A game in a multi-game match finishes and the match continues to the next game. | `matchId, roomId, gameId, gameNumber, nextGameNumber` |
 | `MatchCompleted` | `room-service` | The match series ends (best-of-3, early termination, or all-forfeit). | `matchId, roomId, rankings, wasAbandoned, completedAt` |
 | `RoomCompleted` | `room-service` | The room transitions to `completed` (or `abandoned`) after the match ends. Triggers tournament-completion-counter and lobby cleanup. | `roomId, roomType, status, completedAt` |
@@ -101,7 +105,7 @@ Once a game is in progress, the player's WebSocket connection carries both comma
 
 | Interface | Description |
 |-----------|-------------|
-| `game-engine` ↔ `timer-service` | `game-engine` writes deadline rows to `timer_deadlines` table (shared DB or dedicated). `timer-service` polls and fires expiry commands back to `game-engine` via internal queue or direct RPC. |
+| `game-engine` ↔ `timer-service` | `game-engine` writes deadline rows to `timer_deadlines` table (shared DB or dedicated). `timer-service` polls expired deadlines and fires expiry commands back to `game-engine` via **internal gRPC** (see Timer-service communication mechanism in §Invariant: 5-Second Uno! Challenge Window). |
 | Outbox relay | Background worker within each `game-engine` instance. Ownership is partition-exclusive: each `game-engine` instance is assigned a `gameId` shard range and is the **sole writer** of outbox rows for those games. The relay polls only `outbox WHERE delivered = false AND gameId IN (<this instance's shard range>)`, so parallel pollers across 200 instances query disjoint row sets — no double-delivery by design. As an additional safety net, the poll query uses `FOR UPDATE SKIP LOCKED` (PostgreSQL advisory row-level lock) so that if partition assignment temporarily overlaps during a rolling restart, a row is only processed by one relay worker. Polling interval: 50ms. |
 | `room-service` → `game-engine` | Internal RPC: `InitializeGame { gameId, roomId, players[], gameNumber }`. Triggers the deck initialization pipeline. |
 
@@ -236,6 +240,8 @@ No additional per-player counter is stored. The combination of per-game sequence
 6. If valid: emit `UnoChallengeWindowClosed`, apply no penalty (no challenge was made).
 7. If already closed (challenge resolved it, or version mismatch): discard — idempotent no-op.
 
+**Timer-service → game-engine communication mechanism:** Timer-service communicates expiry commands to game-engine via **internal gRPC** (not Kafka, not shared DB polling). The gRPC call carries `{ gameId, deadlineId, type, version }`. If the target game-engine instance is unreachable (partition or crash), timer-service retries with exponential backoff (100ms, 500ms, 2s) up to 3 times. After 3 failures, the deadline is marked `fire_failed` and an alert is emitted. On game-engine restart, it rescans `timer_deadlines WHERE fired = false AND expiresAt <= now()` to self-heal any missed firings. The gRPC call is idempotent: game-engine checks `version` match before processing.
+
 ### Crash Recovery
 
 - If `timer-service` crashes mid-window: on restart, it re-scans `timer_deadlines` for unfired rows with `expiresAt <= now()`. The deadline is recovered. Worst case: the expiry fires slightly late (by restart time), but the game-engine enforces the 5-second window server-side — a late-arriving challenge is rejected by timestamp comparison in the Game aggregate.
@@ -246,6 +252,8 @@ No additional per-player counter is stored. The combination of per-game sequence
 - `windowId` + `version` form the idempotency key. If `ChallengeWindowExpired` is delivered twice (at-least-once), the second delivery sees `version` has advanced (or window is closed) and is discarded.
 
 **Same pattern applies to:** WDF challenge window (5s), turn timer (30/60s). Only deadline type and expiry command differ.
+
+**Restart safety (partition overlap):** During rolling restarts, a brief overlap window may occur where both old and new instances poll the same shard. Timer-service uses `SELECT ... FOR UPDATE SKIP LOCKED` on the `timer_deadlines` table to prevent double-processing: if the old instance holds a lock on an expired deadline row, the new instance's query skips it. Combined with game-engine's idempotent version-check processing, double-fire is impossible even during overlapping poll windows.
 
 ---
 
@@ -417,7 +425,7 @@ For tournaments, a forfeit during a match is recorded as a loss for advancement 
 |-------|-----------|------|-------------|
 | Event Store | PostgreSQL | `game_events` (gameId, sequenceNumber, eventType, payload, signature, timestamp). Append-only. Partitioned by gameId. | Strong (sequential writes per game) |
 | Outbox | PostgreSQL (same DB) | `outbox` (eventId, topic, partitionKey, payload, delivered). Shared TX with event store. | Strong (same TX as event append) |
-| Room State | PostgreSQL | `rooms` (roomId, status, hostPlayerId, maxPlayers, roomType), `player_slots` (roomId, playerId, joinedAt), `matches` (matchId, roomId, currentGameNumber, perPlayerWins, status) | Strong (per-room) |
+| Room State | PostgreSQL | `rooms` (roomId, status, hostPlayerId, maxPlayers, roomType), `player_slots` (roomId, playerId, joinedAt), `matches` (matchId, roomId, currentGameNumber, perPlayerWins, status), `active_player_rooms` (playerId UNIQUE, roomId, joinedAt) — enforces one-room-per-player (INV-R-14) | Strong (per-room) |
 | Timer Deadlines | PostgreSQL (same or dedicated) | `timer_deadlines` (deadlineId, gameId, type, expiresAt, version, fired) | Strong (polled by timer-service) |
 | Idempotency | PostgreSQL | `command_idempotency` (commandId, gameId, response, createdAt). TTL: 24h. | Strong |
 | Game State Cache | In-memory (per game-engine instance) | Materialized Game aggregate from event replay. Invalidated on instance loss; rebuilt from event store. | Derived (rebuildable) |
@@ -437,3 +445,13 @@ The `game_events` table is the authoritative source for game replay and dispute 
 - Every query to the game log API is itself logged in the audit trail (who queried, when, which game).
 
 **Retention:** Game logs are retained for the configurable retention period (default: 1 year). After retention, logs may be archived to cold storage but are not deleted.
+
+### Player Room Membership Enforcement (INV-R-14)
+
+The `active_player_rooms` table enforces the domain invariant that a player may participate in at most one active room platform-wide:
+
+- **Structure:** `active_player_rooms (playerId PK, roomId, joinedAt)` — UNIQUE on `playerId`.
+- **Write path:** `room-service` inserts a row on `JoinRoom` (or tournament auto-join). The UNIQUE constraint rejects any second insertion for the same `playerId`. On `RoomCompleted`, `PlayerForfeited` (terminal), or `LeaveRoom`, the row is deleted.
+- **Concurrency:** Since `room-service` is partitioned by `roomId`, a cross-room check requires this shared table (unpartitioned, lightweight — one row per active player, ~1M rows max). INSERT uses `ON CONFLICT DO NOTHING` returning the existing row; if a row exists for a different roomId, the join is rejected.
+- **Failure mode:** If `room-service` crashes between game completion and row deletion, the row becomes stale. A background sweeper (every 60s) removes rows pointing to rooms in `completed`/`abandoned` status.
+- **Tournament kickoff:** During round kickoff, `room-service` first DELETEs the previous round's rows (bulk by roomId set) before inserting new assignments.

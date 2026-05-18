@@ -42,15 +42,26 @@ The ingestion (event consumption + ACL + materialization) and query (REST + SSE)
 |------------|-----|-----|
 | `public`, `tournament` | None (anonymous SSE allowed); per-IP rate-limited at the gateway | None (anonymous) |
 | `unlisted` | None (anonymous, but `roomId` must be known out-of-band) | Not listed |
-| `private` | **Bearer JWT required.** `spectator-projection-service` enforces invitee ACL: the JWT's `playerId` must appear on the host-managed invitee list cached on the spectator projection (sourced from `gameplay.rooms` `RoomCreated`/`InviteeListUpdated` events). Anonymous or non-invitee requests return 403. | N/A (private rooms never appear in lobby) |
+| `private` | **Bearer JWT required.** `spectator-projection-service` enforces invitee ACL: the JWT's `playerId` must be on the host-managed invitee list. Access check is a **synchronous call to `room-service`** (see note below). Anonymous or non-invitee requests return 403. | N/A (private rooms never appear in lobby) |
 
 The `spectator-projection-service` performs the visibility lookup before opening the SSE stream and rejects with HTTP 403 (`forbidden_not_invited`) when a private room request lacks a valid JWT or the JWT's `playerId` is not on the invitee list. See `05-client-connection-model.md` §5.2 (Room Visibility table) for the cross-reference and `04-integration-table.md` S8/S11/S13 for the auth treatment per row.
+
+**Private room invitee list — synchronous access check (not event-driven):**
+
+For private rooms, the invitee list is managed by the room host via `room-service` REST API (`POST /api/v1/rooms/{roomId}/invitees` to add, `DELETE /api/v1/rooms/{roomId}/invitees/{playerId}` to remove). When a spectator requests access to a private room, `spectator-projection-service` queries `room-service` synchronously (`GET /api/v1/rooms/{roomId}/invitees` — internal mTLS call, cached for 5 s) to verify the requesting player's membership on the invitee list.
+
+This design was chosen over an event-driven projection (e.g., consuming an `InviteeListUpdated` event) for the following reasons:
+- **Simplicity:** The invitee list is small (typically < 20 entries) and changes infrequently. A synchronous call avoids maintaining a separate projection table and consumer.
+- **Consistency:** A synchronous check against the authoritative source (`room-service`) ensures that a just-removed invitee is immediately denied access, with no consumer lag window.
+- **Low traffic:** Private room spectator requests are rare compared to public/tournament spectating. The synchronous call adds < 10 ms p95 (same-AZ mTLS) and does not represent a scalability concern.
+
+The 5-second response cache at `spectator-projection-service` bounds the load on `room-service` while keeping the staleness window short enough for the use case (host removes an invitee → access denied within 5 s).
 
 ### Asynchronous (Kafka — consumed only)
 
 | Topic | Events Consumed | ACL Transformation |
 |-------|----------------|-------------------|
-| `gameplay.events` | `GameStarted`, `CardPlayed`, `CardDrawn`, `TurnAdvanced`, `TurnPassed`, `DirectionReversed`, `PlayerSkipped`, `ColorChosen`, `UnoCallMade`, `UnoChallengeWindowOpened`, `ChallengeMade`, `ChallengeResolved`, `PenaltyCardsDrawn`, `UnoChallengeWindowClosed`, `WildDrawFourChallengeWindowOpened`, `WildDrawFourChallengeMade`, `WildDrawFourChallengeResolved`, `WildDrawFourChallengeWindowClosed`, `PlayerDisconnected`, `PlayerReconnected`, `PlayerForfeited` | **Privacy filter applied** (see ACL table below) |
+| `gameplay.events` | `GameStarted`, `CardPlayed`, `CardDrawn`, `TurnAdvanced`, `TurnPassed`, `DirectionReversed`, `PlayerSkipped`, `ColorChosen`, `UnoCallMade`, `UnoChallengeWindowOpened`, `UnoChallengeWindowClosed`, `ChallengeMade`, `ChallengeResolved`, `PenaltyCardsDrawn`, `WildDrawFourChallengeWindowOpened`, `WildDrawFourChallengeMade`, `WildDrawFourChallengeResolved`, `WildDrawFourChallengeWindowClosed`, `TurnTimedOut`, `TurnSkippedDueToDisconnection`, `DrawPileReshuffled`, `DeckInitialized`, `InitialHandsDealt`, `FirstCardFlipped`, `PlayerDisconnected`, `PlayerReconnected`, `PlayerForfeited` | **Privacy filter applied** (see ACL table below) |
 | `gameplay.games` | `GameCompleted` | Update game projection to completed state. Strip final hand contents. |
 | `gameplay.rooms` | `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `RoomCompleted` | Lobby read model update. Tournament rooms excluded. |
 | `tournament.lifecycle` | `TournamentCreated`, `RegistrationOpened`, `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `TournamentCompleted` | Bracket projection update. No privacy filtering needed. |
@@ -87,6 +98,14 @@ The ACL is the critical architectural component that ensures spectator privacy. 
 | `PlayerDisconnected` | `SpectatorPlayerDisconnected` | Retain as-is. |
 | `PlayerReconnected` | `SpectatorPlayerReconnected` | Retain as-is. |
 | `PlayerForfeited` | `SpectatorPlayerForfeited` | **Retain:** playerId, reason. Remove player from active participants in projection. |
+| `TurnTimedOut` | `SpectatorTurnTimedOut` | Retain as-is. Spectators see that a player's turn timed out and auto-draw/auto-pass was applied. |
+| `TurnSkippedDueToDisconnection` | `SpectatorTurnSkippedDueToDisconnection` | Retain as-is. Spectators see that a disconnected player's turn was skipped. |
+| `DrawPileReshuffled` | `SpectatorDrawPileReshuffled` | **Strip: new shuffle seed.** Retain only the fact that reshuffling occurred and new draw pile size. Seed is private (enables hand deduction). |
+| `DeckInitialized` | *(dropped — not projected)* | **Entirely suppressed.** Contains `shuffleSeed` and full deck composition. Occurs before spectators join (game initialization phase). No spectator value. |
+| `InitialHandsDealt` | *(dropped — not projected)* | **Entirely suppressed.** Contains private hand contents. Occurs during initialization before spectators can join. Card counts are already reflected in `SpectatorGameStarted`. |
+| `FirstCardFlipped` | `SpectatorFirstCardFlipped` | Retain as-is. The first discard card is public (already visible in `SpectatorGameStarted` but this provides the explicit event for stream subscribers joining mid-init). |
+| `UnoChallengeWindowOpened` | `SpectatorUnoChallengeWindowOpened` | Retain as-is. Spectators see the challenge window opens (which player is at risk). |
+| `UnoChallengeWindowClosed` | `SpectatorUnoChallengeWindowClosed` | Retain as-is. Window closed by timeout or resolution. |
 
 ### Where Privacy Is Enforced
 

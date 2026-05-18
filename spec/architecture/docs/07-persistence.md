@@ -123,6 +123,8 @@ The **transactional outbox** ensures log-before-broadcast:
 - `audit-service` reads from its own ingested `game_log` copy (primary query path) or from a RG read replica (fallback for real-time reconciliation). The AL `game_log` is preferred for performance isolation so audit queries do not add read load to the RG primary.
 - Every audit query is itself logged in the audit trail (meta-audit).
 
+**Authorization scoping detail:** Operators have unrestricted per-game read access (any `gameId`) but cannot perform cross-game searches or exports. Admins can search across games and run integrity checks. Internal mTLS callers are scoped to specific `gameId`s via a request-level allowlist parameter passed in the gRPC metadata (enforced by `audit-service`, not by network policy). Break-glass (compliance) access is gated by the meta-audit synchronous write: the compliance query response is not returned until the meta-audit record is durably committed.
+
 ### Read Models / Caches
 
 | Read Model | Technology | Staleness | Mechanism |

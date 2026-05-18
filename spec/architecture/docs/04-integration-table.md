@@ -21,6 +21,10 @@
 | S11 | `Spectator` → `api-gateway` → `spectator-projection-service` | SSE `GET /spectator/games/{id}/stream` | Live spectator feed. Long-lived connection. Read-only. Anonymous for `public`/`tournament`/`unlisted` rooms. | Connection drop → client auto-reconnects with `Last-Event-ID`. Server rebuilds from projection. Per-IP connection limit (20 SSE). **Auth for `private` rooms:** Bearer JWT required; `spectator-projection-service` validates the JWT's `playerId` against the invitee list before opening the SSE stream (403 `forbidden_not_invited` otherwise). |
 | S13 | `Spectator` → `regional-edge-proxy` → `spectator-projection-service` | **SSE fan-out via regional edge proxy** — for games with >1k spectators, `spectator-projection-service` opens 1 upstream SSE connection per edge region per game. Each `regional-edge-proxy` fans out to up to 10k local spectator connections. Reduces upstream SSE connections from 100k to ~10 (one per region) for tournament finals. Only activated for `public` / `tournament` rooms (private rooms never reach edge fan-out — they always go through `spectator-projection-service` direct so the invitee ACL stays authoritative). | High-spectator rooms (tournament finals with 100k+ spectators). Reduces load on `spectator-projection-service` by 1000×. | Per-IP rate limits still enforced at `regional-edge-proxy`. Proxy auto-subscribes when spectator count exceeds threshold; auto-terminates when room completes. **Upstream SSE failover:** on connection drop, proxy reconnects with `Last-Event-ID` to any healthy `spectator-projection-service` instance (load-balanced, not affinity-pinned); new instance replays events from `sequenceNumber > last_event_id` using the materialized read model (index read, no Kafka replay required). Worst-case gap during consumer-group rebalance: ≤ 30 s. See `spectator-view.md` §Upstream SSE Failover for full failure-path analysis. |
 | S12 | `Player` → `api-gateway` → `ranking-service` | REST `GET /leaderboard`, `GET /players/{id}/rating` | Leaderboard and rating queries. Served from Redis sorted set (leaderboard) or PostgreSQL (rating history). | 1 s timeout. Redis fallback to DB on cache miss. |
+| S14 | `Player` → `api-gateway` → `room-service` | REST `POST /rooms/{id}/leave` | Player leaves room (waiting state only). | 2 s timeout. 409 if room in_progress. Idempotent via `commandId`. Removes `active_player_rooms` row. |
+| S15 | `Player` → `api-gateway` → `room-service` | REST `POST /rooms/{id}/forfeit` | Player explicitly forfeits during an active game. | 2 s timeout. 409 if not in game. Idempotent via `commandId`. Triggers `PlayerForfeited { reason: "explicit_forfeit" }`. |
+| S16 | `Admin` → `api-gateway` → `tournament-service` | REST `POST /tournaments/{id}/rounds/{roundId}/force-resolve` | Admin force-resolves a stuck room that exceeded `maxRoundDuration`. | 5 s timeout. 403 if not admin. 409 if room already completed. Emits `RoomTimeoutForced`. Players ranked by current game state. |
+| S17 | `Organizer/Admin` → `api-gateway` → `tournament-service` | REST `POST /tournaments/{id}/cancel` | Cancel a tournament. Valid in `registration_open` or `in_progress` states. | 5 s timeout. 403 if not organizer/admin. Emits `TournamentCancelled`. In-progress rooms complete naturally but no further rounds are created. |
 
 ---
 
@@ -45,6 +49,12 @@
 | A14 | `ranking-service` → `audit-service` | Pub/Sub: `EloUpdated`, `LeaderboardUpdated` on `ranking.updates` | Audit trail for rating changes. | At-least-once. Idempotent via `eventId`. |
 | A15 | `room-service` → `spectator-projection-service` | Pub/Sub: `RoomCreated`, `PlayerJoinedRoom`, `RoomCompleted` on `gameplay.rooms` | Lobby read model (available casual rooms). Tournament rooms excluded from lobby. | At-least-once. Idempotent. Staleness ≤ 1 s. |
 | A16 | `ranking-service` → `audit-service` | Pub/Sub: `PlayerStatisticsUpdated` on `ranking.updates` | Statistics change audit trail. | At-least-once. Idempotent via `eventId`. |
+
+---
+
+### Cross-Cutting Operational Constraint: Kafka Topic Retention for Audit-Service
+
+> All Kafka topics consumed by `audit-service` **MUST** have retention ≤ 7 days. The `audit-service` deduplication index (`processed_events`) is pruned after 7 days. If Kafka retention exceeds this window, consumer replay after pruning would produce duplicate audit entries. This constraint applies to: `identity.sessions`, `gameplay.events`, `gameplay.games`, `gameplay.rooms`, `gameplay.audit`, `tournament.lifecycle`, `tournament.rooms`, `ranking.updates`.
 
 ---
 
@@ -104,14 +114,14 @@
 
 | Category | Row Count | Key Patterns |
 |----------|-----------|--------------|
-| Synchronous (REST/WS) | 12 | Request/response, WebSocket relay |
+| Synchronous (REST/WS) | 16 | Request/response, WebSocket relay |
 | Async Event Propagation | 17 | Kafka pub/sub with consumer groups |
 | Transactional Outbox | 2 | Log-before-broadcast, session CAS |
 | CQRS / Read Models | 4 | Event-carried state transfer, Redis cache |
 | Sagas / Process Managers | 3 | Choreographed (round kickoff/advancement), orchestrated (match series) |
-| Session Invalidation | 2 | Push-invalidation via Kafka |
+| Session Invalidation | 3 | Push-invalidation via Kafka + adaptive throttle directives |
 | Timer / Window Management | 5 | Durable deadlines, poll-and-fire, idempotent expiry |
-| **Total** | **45** | |
+| **Total** | **50** | |
 
 ---
 

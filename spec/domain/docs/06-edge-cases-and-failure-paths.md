@@ -347,13 +347,13 @@ If the disconnected player won by last-standing: their result is preserved regar
 - `ReconnectionTimerExpired` × 2
 - `PlayerForfeited` × 2
 - `HandRemoved` × 2
-- `GameAbandoned { gameId, reason: all_players_forfeited }`
-- `MatchAbandoned { roomId, matchId }`
+- `GameCompleted { gameId, wasAbandoned: true, placements: [] }`
+- `MatchCompleted { roomId, matchId, wasAbandoned: true }`
 - `RoomCompleted { roomId, outcome: abandoned }`
 
 **Invariants that must hold.**
-- INV-A1: A game where all remaining players forfeit is classified as `abandoned`. No Elo changes are applied.
-- INV-A2: `GameAbandoned` and `GameCompleted` are mutually exclusive for a given `gameId`.
+- INV-A1: A game where all remaining players forfeit is classified as abandoned via `GameCompleted { wasAbandoned: true }`. No Elo changes are applied.
+- INV-A2: For a given `gameId`, `wasAbandoned` is set exactly once at game completion. When `true`, `winnerId` is `null` and `placements` is empty.
 - INV-D6: Forfeited players' cards are removed, not reshuffled, even in an abandoned game.
 
 ---

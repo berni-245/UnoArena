@@ -44,9 +44,9 @@
 |-------|----------------|----------------|
 | `identity.sessions` | `PlayerRegistered`, `SessionEstablished`, `SessionInvalidated`, `PlayerSuspended`, `PlayerBanned` | Identity & Session |
 | `gameplay.events` | All gameplay state-change events | Room Gameplay (game-engine) |
-| `gameplay.games` | `GameCompleted`, `MatchGameCompleted` | Room Gameplay (game-engine) |
+| `gameplay.games` | `GameCompleted` | Room Gameplay (game-engine) |
 | `gameplay.audit` | `GameCompleted` (full payload: `finalHands[]`, `shuffleSeed`, `deckOrderingAtGameStart`, signed envelope) — audit-privileged content only. ACL-restricted: `audit-service` is the sole subscriber. This channel is the enforcement mechanism for INV-SGP-01: hand and seed data never appear on the public `gameplay.games` topic. | Room Gameplay (game-engine, via outbox relay) |
-| `gameplay.rooms` | `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `MatchCompleted`, `RoomCompleted` | Room Gameplay (room-service) |
+| `gameplay.rooms` | `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `MatchGameStarted`, `MatchGameCompleted`, `MatchCompleted`, `RoomCompleted` | Room Gameplay (room-service) |
 
 > **Note:** `PlayerForfeited` is produced by `game-engine` on `gameplay.events` (not `gameplay.rooms`). It is consumed by `audit-service` as part of the universal `gameplay.events` subscription above. The canonical topic for `PlayerForfeited` is `gameplay.events`; this is also reflected in `02-container-view.md` §2.2 and `04-integration-table.md` A11.
 | `tournament.lifecycle` | All tournament lifecycle events | Tournament Orchestration |
@@ -72,9 +72,36 @@
 
 | Step | Owner | Detail |
 |------|-------|--------|
-| Generation | `game-engine` | On `RoomCreated` (before the first game event), `game-engine` calls Vault Transit `POST /v1/transit/keys/room-{roomId}` to mint a 256-bit HMAC-SHA256 key. The Vault path encodes `roomId`; access policies bind read to the `audit-service` role and sign/verify to `game-engine`. Key never leaves Vault in cleartext when Transit is used — signing/verification is performed via `POST /v1/transit/hmac/...` and `POST /v1/transit/verify/...`. If a non-Transit deployment is used, the key is wrapped with the platform KEK and stored in the room-keys table; only the wrapped form persists outside Vault. **First-round kickoff surge:** During tournament first-round kickoff (~10k rooms/s for ~10 s = 100k `RoomCreated` events), 100k Vault Transit key-mint calls arrive in a ~10 s window. Vault Transit is designed for high-throughput key operations (benchmarked at 10k–50k ops/s per cluster node on standard hardware). To ensure availability: (1) the Vault cluster is pre-scaled to ≥3 nodes before tournament start (operational runbook step); (2) `game-engine` uses a Vault client with connection pooling and retries with exponential backoff (max 3 retries over 5 s); (3) if Vault returns 429 (rate-limit) or 503 after retries, `game-engine` falls back to a locally-generated key wrapped with the platform KEK and stored in the room-keys table, then schedules an async reconciliation job to migrate to Vault Transit when the surge subsides. Unsigned events during the fallback window are marked `signatureValid = deferred_fallback` and re-verified when Vault recovers. |
+| Generation | `game-engine` | On `RoomCreated` (before the first game event), `game-engine` calls Vault Transit `POST /v1/transit/keys/room-{roomId}` to mint a 256-bit HMAC-SHA256 key. The Vault path encodes `roomId`; access policies bind read to the `audit-service` role and sign/verify to `game-engine`. Key never leaves Vault in cleartext when Transit is used — signing/verification is performed via `POST /v1/transit/hmac/...` and `POST /v1/transit/verify/...`. If a non-Transit deployment is used, the key is wrapped with the platform KEK and stored in the room-keys table; only the wrapped form persists outside Vault. **First-round kickoff surge:** During tournament first-round kickoff (~10k rooms/s for ~10 s = 100k `RoomCreated` events), 100k Vault Transit key-mint calls arrive in a ~10 s window. Vault Transit is designed for high-throughput key operations (benchmarked at 10k–50k ops/s per cluster node on standard hardware). To ensure availability: (1) the Vault cluster is pre-scaled to ≥3 nodes before tournament start (operational runbook step); (2) `game-engine` uses a Vault client with connection pooling and retries with exponential backoff (max 3 retries over 5 s); (3) if Vault returns 429 (rate-limit) or 503 after retries, `game-engine` falls back to a locally-generated key wrapped with the platform KEK and stored in the room-keys table, then schedules an async reconciliation job to migrate to Vault Transit when the surge subsides. Unsigned events during the fallback window are marked `signatureValid = deferred_fallback` and re-verified when Vault recovers. **Fallback key security properties:** The locally-generated fallback key uses the same algorithm (256-bit HMAC-SHA256) and entropy source (OS CSPRNG) as Vault Transit would produce. The only difference is lifecycle management: locally-generated keys are wrapped with the platform Key Encryption Key (KEK) and stored in the game-engine's local encrypted keystore. The async reconciliation job (runs within 60s) imports these keys into Vault Transit for centralized rotation policy. Security properties (entropy, algorithm) are identical; only the key-management lifecycle differs during the reconciliation window. |
 | Key-creation event | `game-engine` → `audit-service` | A `RoomKeyEstablished { roomId, keyVersion, vaultPath, createdAt }` envelope is emitted on `gameplay.rooms` (audit ACL) so the audit trail records the start of the signed chain. |
 | Use | `game-engine` (sign), `audit-service` (verify) | Every integrity-critical event payload is HMAC'd at write time; `audit-service` re-verifies on ingest. Verification failures emit a high-severity alert and the event is quarantined in `audit_quarantine` for human review (not silently appended). |
+
+#### Quarantine Specification
+
+**Schema:**
+```sql
+audit_quarantine (
+  quarantineId    UUID            PRIMARY KEY,
+  eventId         UUID            NOT NULL,
+  sourceContext   TEXT            NOT NULL,
+  gameId          UUID,
+  reason          TEXT            NOT NULL,
+  rawPayload      JSONB           NOT NULL,
+  quarantinedAt   TIMESTAMPTZ     NOT NULL DEFAULT now(),
+  resolvedAt      TIMESTAMPTZ     NULL,
+  resolvedBy      TEXT            NULL,
+  resolution      TEXT            NULL
+)
+```
+
+**Access:**
+- `GET /api/v1/audit/quarantine` — role: `admin` only. Returns a paginated list of quarantined events (filterable by `sourceContext`, `gameId`, `reason`, `resolved` status). Each entry includes the `rawPayload` for inspection.
+
+**Resolution process:**
+- An admin reviews the quarantined event and marks it with one of two resolutions:
+  - `false_positive` — the event is re-verified (e.g., key was temporarily unavailable), confirmed valid, and re-appended to the audit trail with `signatureValid = verified_after_quarantine`.
+  - `confirmed_tamper` — the event is escalated to the security team, the associated game is flagged for investigation, and the raw payload is preserved as forensic evidence. The event is **not** appended to the audit trail.
+- Resolution writes `resolvedAt`, `resolvedBy` (admin identity), and `resolution` to the quarantine row. The resolution action is itself meta-audited.
 | Rotation | Operations | Per-room keys are immutable for the life of the room. Cross-room rotation is implicit (each new room mints a new key). Vault Transit min-decryption-version policies prevent reuse. Master Vault keys backing Transit rotate every 90 d. |
 | Unavailability during verification | `audit-service` | If Vault is unreachable: `audit-service` continues to ingest events (does not block the producer) but marks `signatureValid = unknown` until verification succeeds on retry. A background reconciliation job re-verifies pending rows when Vault returns. Operator/admin queries surface unknown-state explicitly. |
 | Key destruction | Compliance | At end of retention (default 1 y active + cold archive), the Vault Transit key is marked for deletion only after archive HMAC chains are exported and counter-signed by compliance. Until then, keys are preserved to support replay. |
@@ -154,8 +181,10 @@ This wires the T-3 / T-4 mitigations to a concrete key-store contract, makes fai
 
 ### Ordering
 
-- Within a game: events are ordered by `sequenceNumber` (from the Game aggregate). The `game_log` table enforces a unique constraint on `(gameId, sequenceNumber)`. Out-of-order events are buffered or reordered on read.
+- Within a game: events are ordered by `sequenceNumber` (from the Game aggregate). The `game_log` table enforces a unique constraint on `(gameId, sequenceNumber)`.
 - Cross-context: events are ordered by `timestamp` (server-authoritative). Causal ordering is tracked via `correlationId` and `causationId` for reconstruction.
+
+**Out-of-order event handling:** Within a single game, events arrive in-order because `gameplay.events` is partitioned by `gameId` (single partition = total order). Out-of-order delivery is NOT possible for intra-game events under normal Kafka operation. The only scenario for out-of-order is consumer replay after a partition reassignment, which is handled by the deduplication guard (eventId). For HMAC chain verification, events are always validated in sequenceNumber order by reading from the `game_log` table (indexed by `(gameId, sequenceNumber)`), not from the Kafka consumer position. This means verification is always correct regardless of consumer delivery order.
 
 ---
 
@@ -165,8 +194,8 @@ This wires the T-3 / T-4 mitigations to a concrete key-store contract, makes fai
 
 | Store | Technology | Data | Consistency |
 |-------|-----------|------|-------------|
-| Game Log (derived copy) | PostgreSQL (partitioned by gameId) or ClickHouse | `game_log` (gameId, sequenceNumber, eventType, payload, signature, signatureValid, timestamp, correlationId, causationId). Append-only. Ingested from `gameplay.audit` (full payload) and `gameplay.events` (game-state events). | Eventual (ingested from Kafka; authoritative source is `game_events` in RG) |
-| Audit Trail | PostgreSQL or ClickHouse | `audit_trail` (entryId, sourceContext, aggregateType, aggregateId, eventType, payload, timestamp, correlationId, causationId, signatureStatus). Append-only. | Eventual (at-least-once ingestion) |
+| Game Log (derived copy) | PostgreSQL (hash-partitioned by `gameId`) | `game_log` (gameId, sequenceNumber, eventType, payload, signature, signatureValid, timestamp, correlationId, causationId). Append-only. Ingested from `gameplay.audit` (full payload) and `gameplay.events` (game-state events). | Eventual (ingested from Kafka; authoritative source is `game_events` in RG) |
+| Audit Trail | PostgreSQL (monthly range-partitioned by `timestamp`) | `audit_trail` (entryId, sourceContext, aggregateType, aggregateId, eventType, payload, timestamp, correlationId, causationId, signatureStatus). Append-only. | Eventual (at-least-once ingestion) |
 | Processed Events | PostgreSQL | `processed_events` (eventId). Deduplication index. | Strong (checked before insert) |
 | Signature Keys | Vault / secure key store | Per-room HMAC keys. Read-only for audit-service. | N/A (infrastructure) |
 
@@ -185,7 +214,8 @@ This wires the T-3 / T-4 mitigations to a concrete key-store contract, makes fai
 - `game_log` and `audit_trail` tables have no UPDATE or DELETE permissions for the application role. Only INSERT.
 - Database-level triggers reject any UPDATE/DELETE attempt.
 - For PostgreSQL: table is append-only by application convention + row-level security policy.
-- For ClickHouse: the MergeTree engine naturally supports append-only workloads.
+
+> **Technology commitment:** The operational store for both `audit_trail` and `game_log` is **PostgreSQL** — consistent with the rest of the system's PostgreSQL ecosystem. `audit_trail` uses monthly range-partitioned tables (by `timestamp`); `game_log` uses hash-partitioning by `gameId`. ClickHouse may be considered for future analytical workloads (e.g., cross-tournament pattern analysis, long-range compliance reporting) but the operational store is PostgreSQL.
 
 ### Retention
 

@@ -2952,48 +2952,7 @@ When a command cannot be processed, the context emits `CommandRejected` (for gam
 
 ---
 
-#### MatchAbandoned
-
-| Field | Value |
-|-------|-------|
-| **Event Name** | `MatchAbandoned` |
-| **Context** | RG |
-| **Triggering Policy** | All players forfeit before match is decided |
-| **Aggregate** | `Match` |
-
-**Key Payload Fields:**
-```
-{
-  matchId     : UUID
-  roomId      : UUID
-  matchNumber : uint8
-  reason      : "all_players_forfeited"
-  abandonedAt : ISO-8601
-}
-```
-
----
-
-#### GameAbandoned
-
-| Field | Value |
-|-------|-------|
-| **Event Name** | `GameAbandoned` |
-| **Context** | RG |
-| **Triggering Policy** | All remaining players forfeit simultaneously |
-| **Aggregate** | `Game` |
-
-**Key Payload Fields:**
-```
-{
-  gameId      : UUID
-  roomId      : UUID
-  matchNumber : uint8
-  gameNumber  : uint8
-  reason      : "all_players_forfeited"
-  abandonedAt : ISO-8601
-}
-```
+> **Note:** `GameAbandoned` and `MatchAbandoned` are NOT separate events. Abandonment is represented by `GameCompleted { wasAbandoned: true }` and `MatchCompleted { wasAbandoned: true }` respectively. This avoids event-type proliferation while providing a clear discriminator for downstream consumers (Ranking filters on `wasAbandoned`, Tournament records all-forfeit as elimination). See `GameCompleted` and `MatchCompleted` above.
 
 ---
 

@@ -126,7 +126,25 @@ The spectator view is eventually consistent with a deliberate delay (A35).
 
 ---
 
-### 11.1.9 `gameplay.events` Consumer-Group Lag SLOs
+### 11.1.9 Audit Query Latency
+
+The audit API serves operator/admin/compliance queries against the append-only audit trail (ClickHouse or PostgreSQL analytical store). These are non-interactive queries — no player-facing impact — but compliance workflows require bounded response times.
+
+| Endpoint | Method | Budget (p95) | Notes |
+|----------|--------|-------------|-------|
+| `GET /audit/games/{gameId}/log` | GET | **< 2 s** | Single game event log, paginated. Indexed by `gameId` + `seq`. Typical game has 50–500 events. |
+| `GET /audit/trail` | GET | **< 5 s** | Cross-game search (by playerId, time range, event type). Requires indexed query on ClickHouse materialized view or PostgreSQL composite index. |
+| `POST /audit/trail/export` | POST | Job submitted **< 1 s**; completion **< 15 min** for large datasets | Async export (CSV/JSON). Returns `202 Accepted` with job ID. Completion time depends on dataset size; 15-minute SLO covers exports spanning millions of events (e.g., full tournament audit). |
+| `GET /audit/games/{gameId}/replay` | GET | **< 3 s** | Full game reconstruction (all events + deck ordering + final hands). Requires joining event store data with audit-privileged fields. Used for deterministic replay verification by compliance officers. |
+
+**Why these budgets are achievable:**
+- Single-game queries hit a partition-pruned index (gameId is the partition key in the audit store).
+- Cross-game search leverages ClickHouse's columnar storage with pre-aggregated materialized views on `(playerId, timestamp)` and `(eventType, timestamp)`.
+- Async export offloads large scans to a background worker with dedicated read replicas, avoiding interference with interactive queries.
+
+---
+
+### 11.1.10 `gameplay.events` Consumer-Group Lag SLOs
 
 All four consumer groups on `gameplay.events` operate independently. Each group must define a maximum acceptable lag before backpressure or scaling is triggered:
 
