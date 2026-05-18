@@ -88,7 +88,7 @@ The **transactional outbox** ensures log-before-broadcast:
 
 1. **Same TX:** `game_events` INSERT + `outbox` INSERT in one PostgreSQL transaction.
 2. **COMMIT** = log is durable. Client ACK sent after COMMIT.
-3. **Outbox relay worker** (within `game-engine` deployment) polls `outbox WHERE delivered = false` every 50 ms, publishes to Kafka, marks `delivered = true`.
+3. **Outbox relay worker** (within each `game-engine` instance) polls `outbox WHERE delivered = false AND gameId IN (<instance's shard range>)` every 50 ms using `SELECT … FOR UPDATE SKIP LOCKED` (PostgreSQL advisory lock, prevents duplicate processing during rolling restarts or shard rebalancing). Publishes to Kafka, marks `delivered = true`. Partition-exclusive ownership means parallel pollers query disjoint row sets by design; `SKIP LOCKED` is the safety net for transient overlaps.
 
 **Crash scenarios:**
 
@@ -286,9 +286,11 @@ None. Tournament state is low-volume and queried directly from PostgreSQL. Brack
 
 ### Primary Store
 
+**Choice: PostgreSQL with JSONB.** MongoDB was considered but rejected in favour of PostgreSQL for the following reasons: (1) operational consistency — all other bounded contexts use PostgreSQL, reducing tooling and credential sprawl; (2) JSONB in PostgreSQL provides efficient document storage with GIN index support for the projection documents; (3) the write rate (~25k UPSERT/s) is well within PostgreSQL capability with connection pooling; (4) document cardinality is bounded — at most 100k active game projections and a few hundred lobby entries at once, far below the scale where MongoDB's horizontal sharding provides meaningful benefit.
+
 | Technology | Tables | Data Owned |
 |-----------|--------|------------|
-| PostgreSQL or MongoDB | `spectator_game_projections` | Denormalized per-game documents: `gameId`, `roomId`, `gamePhase`, `players[]` (with `cardCount`, not hand contents), `discardPile`, `turnDirection`, `currentPlayer`, `matchScore`, `lastEvent`, `updatedAt` |
+| PostgreSQL (JSONB columns) | `spectator_game_projections` | Denormalized per-game documents: `gameId`, `roomId`, `gamePhase`, `players[]` (with `cardCount`, not hand contents), `discardPile`, `turnDirection`, `currentPlayer`, `matchScore`, `lastEvent`, `updatedAt` |
 | | `available_rooms` | Lobby listing: `roomId`, `hostName`, `playerCount`, `maxPlayers`, `createdAt`. Casual rooms only. |
 | | `tournament_brackets` | Bracket projection: `tournamentId`, `rounds[]`, player advancement/elimination per round. |
 
@@ -327,6 +329,7 @@ None. Tournament state is low-volume and queried directly from PostgreSQL. Brack
 | | `audit_trail` | `entryId`, `sourceContext`, `aggregateType`, `aggregateId`, `eventType`, `payload`, `timestamp`, `correlationId`, `causationId`, `signatureStatus`. Append-only. |
 | | `processed_events` | `eventId`. Deduplication index. |
 | Vault / secure key store | (N/A) | Per-room HMAC keys. Read-only for `audit-service`. |
+| PostgreSQL (dedicated schema) | `compliance_meta_audit` | One row per compliance break-glass query: `officerId`, `endpoint`, `queryParams`, `resultRowCount`, `requestTimestamp`, `ipAddress`, `correlationId`. INSERT-only for `audit-service`; SELECT only for `admin` role. Separate from `audit_trail` to prevent compliance self-redaction. Retention: 5 years minimum. |
 
 ### Consistency Model
 
@@ -396,5 +399,5 @@ Event backbone for all async integration. See [02-container-view.md](02-containe
 | Room Gameplay | Event store, Rooms, Matches, Timers | PostgreSQL | Strong (per-game TX) | In-memory game cache | Events: 1 yr → cold |
 | Tournament Orchestration | Tournaments, Rounds, Results | PostgreSQL | SERIALIZABLE (counter) | None (direct queries) | 1 yr after completion |
 | Ranking & Statistics | Ratings, History, Stats | PostgreSQL | Strong (per-player TX) | Redis leaderboard | History: indefinite |
-| Spectator View | Projections, Lobby, Brackets | PostgreSQL / MongoDB | Eventual (≤ 500 ms) | All are read models | Games: 24 h post-complete |
+| Spectator View | Projections, Lobby, Brackets | PostgreSQL (JSONB) | Eventual (≤ 500 ms) | All are read models | Games: 24 h post-complete |
 | Audit & Game Log | Game log, Audit trail | PostgreSQL / ClickHouse | Append-only, at-least-once | Indexed by correlationId | Game log: 1 yr; Audit: 2 yr |

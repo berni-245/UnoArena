@@ -45,7 +45,7 @@ C4Container
 
     System_Boundary(sv_ctx, "Spectator View Context") {
         Container(spectator_svc, "spectator-projection-service", "Worker + Query Service", "ACL: strips hands/deck/seed/seqNums from RG events. Materializes spectator read model, lobby listing, tournament bracket projection. Serves spectator queries.")
-        ContainerDb(sv_db, "SV PostgreSQL / MongoDB", "Document Store", "Denormalized spectator projections, lobby, brackets")
+        ContainerDb(sv_db, "SV PostgreSQL", "PostgreSQL (JSONB)", "Denormalized spectator projections, lobby, brackets — stored as JSONB documents; chosen over MongoDB for operational consistency with other contexts and sufficient write throughput at 25k events/s")
     }
 
     System_Boundary(al_ctx, "Audit & Game Log Context") {
@@ -92,6 +92,8 @@ C4Container
     Rel(tournament, kafka, "Subscribe: MatchCompleted, RoomCompleted", "topic: gameplay.rooms")
     Rel(tournament, kafka, "Subscribe: PlayerForfeited (tournament elimination)", "topic: gameplay.events")
     Rel(tournament, kafka, "Subscribe: PlayerSuspended, PlayerBanned", "topic: identity.sessions")
+    Rel(engine, kafka, "Subscribe: PlayerSuspended, PlayerBanned → immediate forfeit if mid-game", "topic: identity.sessions")
+    Rel(room, kafka, "Subscribe: PlayerSuspended, PlayerBanned → remove player from waiting room", "topic: identity.sessions")
     Rel(tournament, kafka, "Publish: TournamentRoundCreated, PlayerAdvanced/Eliminated", "topic: tournament.lifecycle")
     Rel(kickoff, kafka, "Publish: TournamentRoomAssigned (rate-limited, sharded)", "topic: tournament.rooms")
     Rel(room, kafka, "Subscribe: TournamentRoomAssigned → create tournament room", "topic: tournament.rooms")
@@ -120,13 +122,17 @@ C4Container
 
 | Topic | Partitioning Key | Producers | Consumers | Purpose |
 |-------|-----------------|-----------|-----------|---------|
-| `identity.sessions` | `playerId` | `identity-service` | `api-gateway`, `game-engine`, `tournament-service`, `ranking-service`, `audit-service` | Session lifecycle events: `PlayerRegistered`, `SessionEstablished`, `SessionInvalidated`, `PlayerSuspended`, `PlayerBanned` |
+| `identity.sessions` | `playerId` | `identity-service` | `api-gateway`, `game-engine`, `room-service`, `tournament-service`, `ranking-service`, `audit-service` | Session lifecycle events: `PlayerRegistered`, `SessionEstablished`, `SessionInvalidated`, `PlayerSuspended`, `PlayerBanned` |
 | `gameplay.rooms` | `roomId` | `room-service` | `tournament-service`, `spectator-projection-service`, `audit-service` | Room lifecycle: `RoomCreated`, `PlayerJoinedRoom`, `PlayerLeftRoom`, `RoomFilled`, `MatchGameCompleted`, `MatchCompleted`, `RoomCompleted` |
 | `gameplay.games` | `gameId` | `game-engine` (via outbox relay) | `room-service`, `ranking-service`, `spectator-projection-service`, `audit-service` | Game-level completion: `GameCompleted` |
 | `gameplay.events` | `gameId` | `game-engine` (via outbox relay) | `room-service`, `tournament-service`, `spectator-projection-service`, `ranking-service`, `audit-service` | All gameplay state-change events: `CardPlayed`, `CardDrawn`, `TurnAdvanced`, `TurnPassed`, `PlayerForfeited`, `PlayerDisconnected`, `PlayerReconnected`, WDF/Uno challenge events, etc. — high volume |
 | `tournament.lifecycle` | `tournamentId` | `tournament-service` | `spectator-projection-service`, `ranking-service`, `audit-service` | `TournamentCreated`, `RegistrationOpened`, `TournamentStarted`, `TournamentRoundCreated`, `PlayerAdvanced`, `PlayerEliminated`, `FinalRoomCreated`, `AllMatchesInRoundCompleted`, `TournamentCompleted` |
 | `tournament.rooms` | `roomId` | `round-kickoff-worker` | `room-service` | `TournamentRoomAssigned` — high burst at round start |
 | `ranking.updates` | `playerId` | `ranking-service` | `audit-service` | `EloUpdated`, `LeaderboardUpdated`, `PlayerStatisticsUpdated` |
+| `tournament.kickoff-work` | `roundId` (or player-range hash) | `tournament-service` | `round-kickoff-worker` | Internal work-queue for Round Kickoff saga. Carries `{ tournamentId, roundId, roomAssignment: { roomId, playerIds[], roomConfig } }`. Retention: 24 h (transient). ACL: producer = `tournament-service` only; consumer group = `round-kickoff-worker` shards. Owned by Tournament Orchestration context. |
+| `gameplay.audit` | `gameId` | `game-engine` (via outbox relay) | `audit-service` | Audit-only payload-detail channel for `GameCompleted`: full final-hand contents, deck shuffle seed, signed envelope. ACL-restricted (single consumer group = `audit-service`). Separated from `gameplay.games` to prevent hand/seed leakage to `ranking-service` / `spectator-projection-service` / `room-service`. |
+
+| `tournament.rooms.dlq` | `roomId` | `room-service` (on permanent creation failure, after 3 retries) | `tournament-service` | Dead-letter queue for `TournamentRoomAssigned` messages that `room-service` cannot process after exhausting retries. Each DLQ message carries the original `TournamentRoomAssigned` payload plus `failureReason` and `attemptCount`. `tournament-service` polls this topic; on receipt it logs the failure, marks the room as `creation_failed` in `tournament_room_results`, and waits for the 5-minute round-kickoff timeout to trigger `ForceResolveTimedOutRoom` (the existing escalation path in P1). Retention: 24 h. |
 
 **Ordering guarantees:** Partitioning by aggregate ID (`gameId`, `roomId`, etc.) ensures total ordering of events within a single aggregate. Cross-aggregate ordering is eventual.
 
@@ -137,6 +143,7 @@ C4Container
 | Component | Horizontal? | Partition/Shard Key | Singleton Risk | Notes |
 |-----------|------------|---------------------|----------------|-------|
 | `api-gateway` | Yes | Stateless (session map in Redis) | None | Scale with connection count |
+| `regional-edge-proxy` | Yes | Region + gameId (one upstream SSE per game per region) | None | Optional deployable for high-spectator rooms (>1k spectators). Subscribes to 1 upstream SSE stream from `spectator-projection-service` and fans out to up to 10k regional spectator SSE connections. Deployed per geographic region. Not required for average rooms; activated automatically when spectator count on a game exceeds a configurable threshold. |
 | `identity-service` | Yes | Stateless | None | DB is bottleneck; cacheable reads |
 | `room-service` | Yes | `roomId` | None | Partition affinity optional |
 | `game-engine` | Yes | `gameId` | None | Event-sourced; any instance can rebuild from log |

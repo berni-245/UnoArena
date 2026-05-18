@@ -112,7 +112,7 @@ INV-G-05 is updated to read: "Every command that mutates Game state must carry t
 
 **Domain file changed:** *None.* The domain already covers this correctly.
 
-**Architecture file:** `spec/architecture/03-bounded-contexts/room-gameplay.md` — §Log-Before-Broadcast
+**Architecture file:** `spec/architecture/docs/03-bounded-contexts/room-gameplay.md` — §Log-Before-Broadcast
 
 **Deliverable:** *Deliverable 7 — Consistency and recovery strategy* (for reference only; no edit needed)
 
@@ -130,7 +130,7 @@ The architecture document names the concrete implementation of Option B — a tr
 
 **Domain file changed:** *None.* The domain already covers this correctly.
 
-**Architecture file:** `spec/architecture/03-bounded-contexts/room-gameplay.md` — §5-Second Uno! Challenge Window, §60-Second Reconnection Window
+**Architecture file:** `spec/architecture/docs/03-bounded-contexts/room-gameplay.md` — §5-Second Uno! Challenge Window, §60-Second Reconnection Window
 
 **Deliverable:** *Deliverable 3 — Aggregates, entities, and value objects* | *Deliverable 7 — Consistency and recovery strategy* (for reference only; no edit needed)
 
@@ -171,7 +171,7 @@ The architecture document names *how* expiry firing survives crashes — via a d
 
 **Domain file changed:** *None.* The domain already covers the relevant saga step correctly.
 
-**Architecture file:** `spec/architecture/03-bounded-contexts/tournament-orchestration.md` — §First-Round Surge Architecture
+**Architecture file:** `spec/architecture/docs/03-bounded-contexts/tournament-orchestration.md` — §First-Round Surge Architecture
 
 **Deliverable:** *Deliverable 7 — Consistency and recovery strategy* (for reference only; no edit needed)
 
@@ -310,7 +310,7 @@ The Events Consumed table for RK (doc 02 §2.1.4) is updated:
 
 **Domain file changed:** *None.* The domain already covers this correctly.
 
-**Architecture file:** `spec/architecture/03-bounded-contexts/spectator-view.md` — §Public Interfaces, §Where Privacy Is Enforced
+**Architecture file:** `spec/architecture/docs/03-bounded-contexts/spectator-view.md` — §Public Interfaces, §Where Privacy Is Enforced
 
 **Deliverable:** *Deliverable 2 — Bounded contexts and context map* (for reference only; no edit needed)
 

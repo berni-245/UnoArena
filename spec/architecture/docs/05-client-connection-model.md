@@ -9,7 +9,7 @@
 | Client Type | Protocol | Auth | Termination Point | Upstream Service | Purpose |
 |-------------|----------|------|-------------------|-----------------|---------|
 | **Player** | WebSocket (`wss://`) | Bearer JWT (validated on upgrade) | `api-gateway` | `game-engine` (relay) | Bidirectional gameplay: commands (PlayCard, DrawCard, CallUno…) + real-time updates (game state events) |
-| **Spectator** | SSE (`https://`) + REST | None (public, per-IP rate-limited) | `api-gateway` | `spectator-projection-service` | Read-only live game feed + lobby/bracket queries |
+| **Spectator** | SSE (`https://`) + REST | Optional Bearer JWT (`role: player` or above); required when room is `visibility = "private"` | `api-gateway` | `spectator-projection-service` | Read-only live game feed + lobby/bracket queries |
 | **Admin** | REST (`https://`) | Bearer JWT (`role: admin/operator/compliance`) | `api-gateway` | `audit-service`, `tournament-service` | Audit queries, tournament management, force-resolve |
 
 ---
@@ -28,6 +28,19 @@
 1. **Read-only sufficiency** — Spectators only consume events; they never send commands. SSE's unidirectional server→client model is a natural fit.
 2. **HTTP/2 multiplexing** — Multiple SSE streams share a single TCP connection, reducing overhead for spectators watching several games.
 3. **CDN/proxy friendliness** — SSE is standard HTTP. Regional edge proxies or CDN layers can cache and fan out SSE streams without WebSocket upgrade support.
+
+### Room Visibility and Spectator Authentication
+
+To support friends-only / unlisted casual rooms and reduce credential-free metadata scraping, rooms carry a `visibility` attribute set at creation by the host:
+
+| Visibility | Lobby Listing | Spectator Auth | Notes |
+|------------|---------------|----------------|-------|
+| `public` | Listed in `/lobby/rooms` | None (anonymous SSE allowed, per-IP limited) | Default for casual rooms; same behavior as before this fix. |
+| `unlisted` | Not listed; reachable only via shared link containing `roomId` | None (anonymous allowed if `roomId` known) | "Friends-with-link" sharing. |
+| `private` | Not listed | Bearer JWT required; spectator `playerId` must appear on the host-managed invitee list (stored on the Room aggregate) | "Friends-only" — `spectator-projection-service` checks invitee list before opening the SSE stream. |
+| `tournament` | Not listed in casual lobby; surfaced via bracket projection | None for spectators; reads still subject to per-IP limits | Existing behavior. |
+
+`room-service` enforces `visibility` at room creation; `spectator-projection-service` enforces it on `GET /spectator/games/{id}` and `GET /spectator/games/{id}/stream`. Lobby projection (`AvailableRooms`) only includes `visibility = "public"`. This also restricts the surface area for anonymous metadata scraping (active games, card counts) to `public` rooms.
 4. **Built-in reconnection** — `EventSource` API auto-reconnects with `Last-Event-ID`, simplifying client-side recovery.
 5. **No auth overhead** — Public spectator streams don't need JWT validation per message, only per-IP rate limiting.
 

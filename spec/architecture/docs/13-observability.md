@@ -237,13 +237,24 @@ The `game-engine` is the highest-cardinality service. Metrics focus on command t
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `kickoff_rooms_published_total` | Counter | `shardId` | `TournamentRoomAssigned` events published |
+| `kickoff_rooms_published_total` | Counter | `shardId`, `roundId` | `TournamentRoomAssigned` events published |
 | `kickoff_rooms_per_second` | Gauge | `shardId` | Current publish rate |
 | `kickoff_consumer_lag_current` | Gauge | `topic=tournament.kickoff-work` | Unprocessed work items in queue |
-| `kickoff_dlq_depth_current` | Gauge | — | Events in dead-letter queue (permanent failures) |
+| `kickoff_dlq_depth_current` | Gauge | `roundId` | Events in dead-letter queue (permanent failures) |
 | `kickoff_backpressure_pauses_total` | Counter | — | Times publish rate was throttled |
+| `kickoff_round_rooms_target` | Gauge | `roundId` | Total rooms expected for this round (set at round creation) |
+| `kickoff_round_rooms_confirmed_created` | Gauge | `roundId` | Rooms for which `RoomCreated` was observed (consumed from `gameplay.rooms` by `tournament-service`); exported by `tournament-service` for cross-service dashboard |
+| `kickoff_round_completion_pct` | Gauge | `roundId` | `kickoff_round_rooms_confirmed_created / kickoff_round_rooms_target × 100` |
 
-**Alert:** `kickoff_dlq_depth_current > 0` → room creation failures requiring operator review.
+**Round Kickoff Progress Alerts (wired to NFR §11.1.6 targets):**
+
+| Alert | Condition | Severity | Action |
+|-------|-----------|----------|--------|
+| Kickoff stall — early warning | `kickoff_round_completion_pct < 50` at T+30s after `TournamentRoundCreated` | **Warning** | Page on-call; check `round-kickoff-worker` shard health and `tournament.rooms` consumer lag |
+| Kickoff stall — 5-minute risk | `kickoff_round_completion_pct < 95` at T+2m30s | **Critical** | Alert before the 5-minute `ForceResolveTimedOutRoom` fires; allows operator to add kickoff shards or trigger manual intervention |
+| DLQ depth non-zero | `kickoff_dlq_depth_current > 0` for 60 s | **Warning** | Room creation failures requiring review; check `tournament.rooms.dlq` |
+
+These alerts are designed to give operators at least 2.5 minutes of warning before the NFR §11.1.6 60-second `TournamentRoomAssigned` deadline and the 5-minute force-resolve timeout.
 
 ---
 

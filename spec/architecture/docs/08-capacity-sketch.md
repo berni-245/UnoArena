@@ -12,7 +12,8 @@
 | Players per room | 10 | Design Checkpoint §2.1.3 |
 | First-round rooms | ~100,000 | 1M / 10 |
 | Spectator-to-player ratio (average) | 5:1 | Conservative estimate; popular rooms higher |
-| Spectator-to-player ratio (finals) | up to 100:1 | High-profile final matches |
+| Spectator-to-player ratio (finals) | up to 100:1 | High-profile final matches; served via `regional-edge-proxy` fan-out (declared deployable, see §2.3 and §8.5) |
+| Hard spectator cap per room | None enforced at the domain level; practical cap = 10 regions × 10k spectators per edge per game = **~100k spectators per room** | Regional edge proxy architecture is the enforcement mechanism |
 | Average game duration | ~10 minutes | Typical Uno game length |
 | Games per match (best-of-3) | 2.5 average | Early termination at 2 wins (2-player) or always 3 (multi-player) |
 | Match duration | ~25 minutes | ~10 min × 2.5 games |
@@ -45,7 +46,7 @@
 | game-engine instances | 200 | Horizontal scaling |
 | Commands per instance | **~500 cmd/s** | 100k / 200 |
 
-Each `game-engine` instance handles ~500 commands/sec. PostgreSQL write per command: 2 inserts (event store + outbox) = ~1,000 writes/sec per instance. Well within PostgreSQL capability with connection pooling (PgBouncer).
+Each `game-engine` instance handles ~500 commands/sec. PostgreSQL write per command: 2 inserts (event store + outbox) = ~1,000 writes/sec per instance. Aggregate across all 200 instances: ~100k writes/s flowing to the single RG PostgreSQL primary. This is at the high end of what cloud PostgreSQL can sustain; the single-primary design is a known bottleneck at this scale. See §8.6 for the concrete mitigation path (horizontal write sharding by `gameId` range).
 
 ### 8.2.3 Event Production Rate (game-engine → Kafka)
 
@@ -183,9 +184,10 @@ Games within a round don't finish simultaneously — game durations vary (~5–2
 | SSE pushes per second | ~25,000 |
 
 **Mitigation for popular rooms:**
-- **Regional edge proxies** subscribe to 1 upstream SSE and fan out to local spectators.
+- **Regional edge proxies** (declared deployable in `02-container-view.md` §2.3 and integration-table S13) subscribe to 1 upstream SSE and fan out to local spectators.
 - 10 regional edges × 10,000 spectators each = 100k spectators served.
 - Upstream: 10 SSE connections (one per edge). Downstream: 100k SSE connections (distributed).
+- This is the enforcement plan for the 100:1 finals ratio. The practical hard cap is ~100k spectators per room with 10 regional edges (expandable to 20 edges for 200k). Domain does not set a lower bound — edge proxy capacity is the operative constraint.
 
 ---
 
@@ -204,20 +206,33 @@ Games within a round don't finish simultaneously — game durations vary (~5–2
 | `spectator-projection-service` | 30 | Event consumption + projection writes (25k/s) | Consumer group partitions + read replicas | None |
 | `audit-service` | 10 | Append-only ingestion (~30k/s) | Consumer group partitions, batch inserts | None |
 | **Kafka** | 5 brokers | 25 MB/s write, 100 MB/s read | Add brokers, increase partitions | None (clustered) |
-| **PostgreSQL (RG)** | 3 (primary + 2 replicas) | 100k writes/s across partitions | Read replicas, connection pooling (PgBouncer) | Primary is write bottleneck; mitigated by partition affinity |
+| **PostgreSQL (RG)** | 3–N (primary shard(s) + 2 replicas each) | 100k writes/s | Horizontal write sharding by `gameId` range (each shard owns a contiguous `gameId` range; `game-engine` instances route writes to their shard's primary). At 1M-player scale, 4 shards × ~25k writes/s each is well within cloud PostgreSQL limits (provisioned IOPS io2, 32k IOPS per shard). Single-shard primary is sufficient for ≤ 50k games (i.e., roughly the first tournament round); sharding is activated before scaling beyond that. | Write sharding is the concrete path to scale; partition affinity at the service layer (each `game-engine` instance is pinned to a `gameId` range) makes routing deterministic without distributed transactions. |
 | **Redis** | 3–6 (cluster) | 1M+ reads/s (session cache) | Cluster sharding | None (clustered) |
 
 ---
 
 ## 8.7 Capacity Headroom
 
+### 2M Total-Player Derivation
+
+The "~2M total players" estimate is derived from the combination of simultaneous casual-play and tournament capacity:
+
+| Constraint | Capacity at current design | Reasoning |
+|------------|---------------------------|-----------|
+| Gateway connections | 6M (600 instances × 10k each) | 1M tournament players + 5M spectators = 6M peak. Remaining headroom supports 1M additional casual players (1M WS + ≈0 spectators for casual) within the same 6M connection budget. |
+| Redis session cache | 1M reads/s (cluster) | Each active session generates ~1 read/request. At 2M simultaneous active sessions (each issuing ~0.5 requests/s average), that is ~1M reads/s — at the cluster limit. |
+| RG PostgreSQL | 100k writes/s with single shard (2 shards → 200k writes/s) | 1M tournament games + an additional 100k casual games = ~110k total games, each at ~1 cmd/s = ~110k writes/s. Within 2-shard capacity. |
+| Kafka (gameplay.events) | 25k events/s sustained per producer group | 1.1M total games × 0.25 events/s = ~275k events/s requires ~11 parallel producer groups / 11× partition count. This is the binding constraint: expanding to 2M concurrent players requires scaling Kafka partitions from 128 to 256+. |
+
+**Conclusion:** The "~2M total players" estimate reflects a realistic upper bound where 1M play in a tournament and 1M play in casual rooms simultaneously. The binding constraints are the Redis session cache (1M reads/s) and Kafka partition count. Scaling to 5M requires multi-region deployment.
+
 | Scaling Dimension | Current Design Supports | Hard Limit | Path to Scale Further |
 |-------------------|------------------------|------------|----------------------|
-| Total players | ~2M | ~5M before multi-region needed | Geo-partitioned tournaments |
+| Total players | ~2M (1M tournament + 1M casual, per derivation above) | ~5M before multi-region needed | Geo-partitioned tournaments |
 | Concurrent games | ~200k | ~500k before Kafka/DB bottleneck | Increase Kafka partitions (128+), more game-engine instances |
 | Spectators | ~10M | ~20M before edge capacity limit | More regional edges, CDN-backed SSE |
 | Event throughput | ~50k events/s | ~100k events/s per Kafka cluster | Multi-cluster Kafka, tiered topics |
-| DB write throughput (RG) | ~200k writes/s | ~500k with connection pooling tuning | Horizontal write sharding by gameId range |
+| DB write throughput (RG) | ~100k writes/s (single shard, provisioned IOPS) | ~400k writes/s with 4-shard horizontal sharding | Add `gameId`-range shards; `game-engine` instances pin to their shard. Sharding is the concrete next step once a single primary approaches its WAL throughput ceiling (~50k writes/s sustained with fsync). |
 
 ---
 

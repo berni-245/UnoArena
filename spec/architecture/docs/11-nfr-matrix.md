@@ -139,7 +139,7 @@ The spectator view is eventually consistent with a deliberate delay (A35).
 | `spectator-projection-service` | ~25,000 events/s ingested; fan-out to ~5M SSE | Horizontal; consumer group + edge SSE proxies | SSE fan-out is the bottleneck, not ingestion |
 | `audit-service` | ~30,000 events/s (all topics combined) | Horizontal; consumer group | Append-only writes; scales with ClickHouse/PostgreSQL write throughput |
 | `identity-service` | ~50,000 token validations/s (mostly Redis, not `identity-service`) | Horizontal; Redis absorbs read load | New login and registration much lower frequency |
-| Kafka `gameplay.events` topic | **~25,000 events/s** sustained; **~500,000 events/s** burst at round-end | Partitioned by `gameId`; target ≥ 128 partitions | Burst is short-lived (all games completing near-simultaneously) |
+| Kafka `gameplay.events` topic | **~25,000 events/s** sustained; **~60,000 events/s** burst at round-start (deck init + deal for 100k games, ~5 s window per §8.3); round-end is a traffic decrease, not a burst, as games stop generating card-play events | Partitioned by `gameId`; target ≥ 128 partitions | Round-start burst is the true peak; Kafka buffers absorb the ~5 s spike. Consumers sized for 25k/s sustained (4× fan-out → ~100k events/s read rate) comfortably handle 60k/s producer burst. |
 
 ---
 

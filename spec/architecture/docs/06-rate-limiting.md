@@ -118,12 +118,18 @@ Catches abuse from authenticated users: automated play bots, rapid command spam,
 | **Deployable** | In-process middleware within `game-engine`, `room-service`, `tournament-service` |
 | **Identity** | `playerId` from gateway-injected claims + `roomId`/`gameId`/`tournamentId` from request path/payload |
 | **Scope** | Per `(playerId, gameId)` for gameplay; per `(playerId, roomId)` for room actions; per `(playerId, tournamentId)` for tournament |
-| **Algorithm** | Sliding window counter in local memory |
-| **Store** | In-process (no Redis) |
+| **Algorithm** | Sliding window counter — Redis-backed (default) with local-memory fast-path when consistent-hash routing by `gameId` is enabled |
+| **Store** | Redis cluster (shared with Layer 1/2). Local memory used only when partition affinity is guaranteed by the gateway. |
 
-### Why Local Memory Is Acceptable
+### Counter Placement
 
-Requests are partitioned by aggregate ID (`gameId`, `roomId`). With consistent routing or Kafka partition affinity, commands for a given game land on the same `game-engine` instance. Local counters are therefore accurate per game. Cross-instance precision is not needed — the aggregate itself enforces invariants (sequence numbers, turn validation).
+The original design assumed the gateway routes every WebSocket for a given `gameId` to the same `game-engine` instance, allowing a process-local counter to be authoritative. The gateway, however, uses round-robin load balancing by default (`05-client-connection-model.md` §5.8) — consistent-hash routing is not guaranteed. A pure local counter therefore under-counts when a player's two commands land on different `game-engine` instances, and the per-room/per-challenge caps become unenforceable. To close this gap:
+
+- **Default mode (required for §6.3 conformance):** Layer 3 per-`(playerId, gameId)` and per-`(playerId, roomId)` counters are stored in the shared **Redis cluster** with key schema `rl:room:{playerId}:{gameId}` and `rl:room:{playerId}:{roomId}`. Sliding-window algorithm, TTL = window duration. This guarantees the cap holds regardless of which `game-engine` instance handles the command. The ~0.3–0.5 ms Redis round-trip is acceptable on the gameplay hot path because Layers 1 and 2 already touch Redis on the same request.
+- **Fast-path optimization (optional):** When the gateway is configured for consistent-hash routing keyed on `gameId` (deployable configuration in `05-client-connection-model.md` §5.8), `game-engine` may use a process-local sliding window as a cache, falling back to Redis on cold start or instance loss. This is an optimization, not a correctness requirement.
+- **Sequence-number and turn invariants** continue to be enforced by the Game aggregate regardless of routing.
+
+This preserves Layer 3 as a defense-in-depth layer even in the absence of partition affinity, restoring the four-layer guarantee required by §6.3 and the D-1/D-3 mitigations in `12-threat-model.md`.
 
 ### How Scope Is Obtained
 
@@ -187,6 +193,17 @@ Adaptive throttling responds to system-wide load signals, not individual user be
 | **Threshold** | Consumer lag > 5,000 messages |
 | **Action** | Reduce publish rate from 1,000 rooms/sec/shard to 500, then 250. Resume normal rate when lag < 1,000. |
 
+### 4e. Identity-Service Adaptive Throttling (D-1)
+
+| Attribute | Value |
+|-----------|-------|
+| **Deployable** | `identity-service` (directive writer) + `api-gateway` (directive enforcer) |
+| **Signal** | Repeated failed logins, anomalous session creation rate, or explicit suspension/ban event from `identity-service` |
+| **Mechanism** | `identity-service` writes a short-lived throttle directive to Redis (`rl:adaptive:{targetType}:{targetId}`). `api-gateway` reads this key on every authenticated request (same Redis call as Layer 2 counter — no extra network hop). On hit, applies the escalated limit tier (`strict` or `block`). |
+| **Failure mode** | Redis unavailable → directive skipped (fail-open; availability preferred over throttling). Layer 1 per-IP and Layer 2 per-user limits remain active. |
+
+This wires the D-1 mitigation from `12-threat-model.md`: adaptive per-offender throttling is now a concrete, traceable mechanism rather than a stated intent. See `identity-session.md` §Internal-Only Interfaces — Throttle Directives for trigger thresholds and directive schema.
+
 ### 4d. Circuit Breaker
 
 | Attribute | Value |
@@ -208,12 +225,11 @@ Adaptive throttling responds to system-wide load signals, not individual user be
 - **TTL:** Keys expire after the window duration (1 min for most, 5 min for login). Automatic cleanup.
 - **Consistency:** Best-effort. Redis is not strongly consistent — a counter may under-count by 1-2 in split-brain scenarios. Acceptable for rate limiting (false negatives are harmless; false positives are rare and self-correcting after TTL).
 
-### Why Layer 3 Uses Local Memory (Not Redis)
+### Layer 3 Store: Redis (default), Local-Memory Fast-Path (optional)
 
-- Requests for a given game are routed to the same `game-engine` instance (partition affinity via `gameId`).
-- Local counters are accurate for the partition.
-- Avoids Redis round-trip on the hot gameplay path (~0.5 ms saved per command).
-- On instance restart, counters reset — acceptable (brief window of no limiting, quickly corrected).
+- **Default:** Redis-backed sliding window (see §6.4 "Counter Placement"). Required when the gateway uses round-robin or any non-affinity routing.
+- **Fast-path:** When the gateway is explicitly configured for consistent-hash routing keyed by `gameId`, a process-local counter may be used as a cache for the Redis-backed authoritative window, saving ~0.3–0.5 ms per command.
+- On instance restart in fast-path mode, the local cache is rebuilt from Redis on first hit; in default mode, no warming is needed.
 
 ---
 
@@ -265,5 +281,5 @@ sequenceDiagram
 |-------|-----------|----------------|-------|-----------|-------|------------|
 | **1. Per-IP** | `api-gateway` (Nginx/Envoy) | Source IP | Global per IP | Token bucket | Redis | 100 req/s REST, 50 msg/s WS, 20 SSE, 10 login/min |
 | **2. Per-User** | `api-gateway` (post-auth middleware) | `playerId` from JWT | Per authenticated user | Sliding window | Redis | 30 cmd/s gameplay, 10 req/s REST, 5 joins/min |
-| **3. Per-Room** | `game-engine`, `room-service`, `tournament-service` | `playerId` + `gameId`/`roomId` from request | Per (player, game/room) | Sliding window | Local memory | 10 cmd/s per game, 3 challenges/5s |
+| **3. Per-Room** | `game-engine`, `room-service`, `tournament-service` | `playerId` + `gameId`/`roomId` from request | Per (player, game/room) | Sliding window | Redis (default); local memory only when consistent-hash routing by `gameId` is enabled | 10 cmd/s per game, 3 challenges/5s |
 | **4. Adaptive** | `api-gateway` + all services | System-wide signals | Global | Latency/queue thresholds | N/A | Priority-based shedding, backpressure, circuit breaker |
