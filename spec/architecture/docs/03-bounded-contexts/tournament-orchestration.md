@@ -142,7 +142,7 @@ tournament-service                    round-kickoff-worker (N shards)          r
 | Kickoff worker crash mid-partition | Kafka consumer group rebalance assigns orphaned partitions to surviving workers | Workers resume from last committed offset. Idempotent room creation ensures no duplicates. |
 | `room-service` rejects a room (e.g., player already in another room) | `TournamentRoomAssigned` results in error event | `tournament-service` receives failure, logs it, and either retries with a substitute player or marks room as degraded. DLQ for unrecoverable failures. |
 | Kafka broker overload | Producer backpressure (buffer full) | Kickoff workers pause, retry with exponential backoff. 10-second target becomes ~30 seconds. Acceptable. |
-| Some rooms never start (permanent failure) | `tournament-service` monitors room creation acknowledgments. Timeout (e.g., 5 minutes) for rooms that never sent `RoomCreated`. | Force-resolve: create replacement rooms or advance remaining players. Emit `TournamentRoomResolved { reason: "creation_timeout" }`. |
+| Some rooms never start (permanent kickoff failure) | `tournament-service` monitors `RoomCreated` acknowledgments. **Room-creation timeout (5 min):** if a room has been assigned (`TournamentRoomAssigned` sent) but `room-service` has not emitted `RoomCreated` within 5 minutes, the assignment is treated as permanently failed. This is a *kickoff failure* — the room never started. Escalation path: DLQ message arrives at `tournament-service` → marks room as `creation_failed` → after the 5-minute window emits `TournamentRoomResolved { reason: "creation_timeout" }`. **This is distinct from `ForceResolveTimedOutRoom`**, which applies only to rooms that *did* start (i.e., a game is running) but haven't completed within `maxRoundDuration` (2 hours). The two timeouts target different lifecycle stages and use different resolution commands. |
 
 ---
 
@@ -164,8 +164,10 @@ RoundCreated
   │     └── [Timeout: 75% of maxRoundDuration]
   │           └── RoundTimeoutWarning (operational alert)
   │           [Timeout: 100% of maxRoundDuration (2 hours)]
-  │             └── ForceResolveTimedOutRoom (for each incomplete room)
-  │                   └── Players ranked by current state, advancing/eliminated
+  │             └── ForceResolveTimedOutRoom (for each room that STARTED but has not COMPLETED)
+  │                   — "round-completion timeout": for in-progress rooms only
+  │                   — distinct from the 5-min "room-creation timeout" (§Partial Failure Handling)
+  │                   └── Players ranked by current game state, advancing/eliminated
   │
   ├── EvaluateAdvancement
   │     For each completed room:

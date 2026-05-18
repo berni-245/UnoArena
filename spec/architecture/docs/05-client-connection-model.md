@@ -204,7 +204,7 @@ sequenceDiagram
         GE->>GE: Player X in active game?
         GE->>GE: Yes → emit PlayerDisconnected
         GE->>GE: Start 60s reconnection timer
-        Note over GE: Old token is invalid →<br/>reconnect attempt fails →<br/>timer expires → PlayerForfeited
+        Note over GE: Old SESSION is invalid.<br/>Reconnect with OLD token fails.<br/>But player CAN log in again<br/>(new sessionId, same playerId)<br/>and reconnect within 60 s →<br/>PlayerReconnected, timer cancelled.<br/>If no reconnect in 60 s →<br/>PlayerForfeited.
     end
 ```
 
@@ -212,11 +212,13 @@ sequenceDiagram
 
 **Fallback:** If gateway misses the Kafka event (consumer lag spike), the 30 s heartbeat token revalidation catches the stale session.
 
+**Game participation is bound by `playerId`, not `sessionId`.** The 60-second reconnection timer runs against the Player's game slot, not the session. A player who inadvertently logged in from a second device (superseding their first session) can re-authenticate via REST and rejoin the same game with a fresh JWT carrying the same `playerId` within the 60-second window. The `Reconnect` command is accepted based on `playerId` membership, not session continuity. Only if no reconnect arrives within 60 seconds does `PlayerForfeited` fire.
+
 **Per-Connection-Type Impact:**
 
 | Connection Type | Impact | Recovery |
 |----------------|--------|----------|
-| Player WebSocket | Close frame 4001 sent. Game-engine starts 60 s timer. | Player re-authenticates with new JWT, sends `reconnect` command. |
+| Player WebSocket | Close frame 4001 sent. Game-engine starts 60 s timer for the Player's game slot. | Player re-authenticates (new session, same `playerId`), sends `reconnect { gameId }` within 60 s. Timer cancelled on success. |
 | Spectator SSE | SSE streams are public (no session). Unaffected. | N/A |
 | REST request | Next request with old token → 401 at gateway. | Client refreshes auth. |
 
@@ -253,14 +255,17 @@ Gateway routing ensures spectator SSE endpoints serve data exclusively from `spe
 
 ## 5.7 Reconnection Strategy
 
+**Foundational rule: game participation is bound by `playerId`, not `sessionId`.** A player is identified as a game participant by their `playerId` (from the JWT claim). Session rotation (logging in from a new device, thereby superseding the old session) does not forfeit game participation — the 60-second reconnection window runs against the Player's game slot and is cancelled by a `Reconnect` command carrying any valid JWT with the same `playerId`, regardless of which `sessionId` it carries.
+
 ### Player WebSocket Reconnection
 
 1. **Client-side:** Exponential backoff with jitter — 1 s, 2 s, 4 s, 8 s (max 30 s). On reconnect:
-   - If old JWT is still valid → reuse. If expired → re-authenticate via REST (`POST /sessions`).
+   - If old JWT is still valid → reuse. If expired (or superseded) → re-authenticate via REST (`POST /sessions`). The new JWT carries the same `playerId` but a new `sessionId`.
    - Send `reconnect { gameId }` command over new WebSocket.
 
 2. **Server-side:** `game-engine` receives `Reconnect` command:
-   - Verify player is a participant and reconnection window is still open.
+   - Verify JWT's `playerId` is a participant in `gameId` and reconnection window is still open (within 60 s of `PlayerDisconnected`).
+   - The `sessionId` in the new JWT may differ from the one that was playing before — this is expected and accepted (session rotation does not forfeit the game slot).
    - Emit `PlayerReconnected`. Cancel 60 s timer (version increment on `timer_deadlines`).
    - Send full game state snapshot (replayed from event store) over WebSocket.
    - Client reconciles `aggregateSequence` — events since last-seen are replayed.
@@ -299,8 +304,9 @@ Gateway routing ensures spectator SSE endpoints serve data exclusively from `spe
 
 - `api-gateway` is stateless (session map in Redis, connection map in memory per instance).
 - `SessionInvalidated` events consumed by every gateway instance (each checks its local `connectionMap`).
-- Load balancer distributes new connections round-robin.
-- Optional: consistent-hash routing by `gameId` for connection affinity (reduces cross-instance fan-out for game state updates).
+- **Player WebSocket → `game-engine` relay uses consistent-hash routing keyed by `gameId`** (extracted from the `/ws/games/{gameId}` URL path on upgrade). This is the deployed mode, not an option: the outbox-relay partition-exclusive ownership in `03-bounded-contexts/room-gameplay.md` §Internal-Only Interfaces and the in-memory aggregate cache budget in `11-nfr-matrix.md` §11.1.1 both rely on every command for a given `gameId` landing on the same `game-engine` instance for the lifetime of that game. Gateway → game-engine pinning is rebalanced only on instance loss; on rebalance the new instance rebuilds the aggregate from the event store and `SKIP LOCKED` on the outbox relay prevents double publish during the transient overlap.
+- All **non-gameplay** REST and SSE routes (REST proxies to `identity-service`, `room-service`, `tournament-service`, `ranking-service`, `audit-service`, `spectator-projection-service`) use plain round-robin load balancing — no affinity required.
+- Rate limiting Layer 3 is Redis-backed by default (`06-rate-limiting.md` §6.4); the local-memory fast-path is enabled only because `gameId` consistent hashing is the configured mode for the gameplay path.
 
 ### Spectator Fan-Out
 

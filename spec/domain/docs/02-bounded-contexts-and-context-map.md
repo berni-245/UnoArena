@@ -108,6 +108,7 @@ UnoArena is decomposed into six bounded contexts. Each context owns a distinct a
 | `PlayerReconnected` | A player has reconnected within the 60-second window. |
 | `PlayerForfeited` | A player has forfeited (disconnection timeout or explicit forfeit). |
 | `GameCompleted` | A single game has ended. Includes final placement order, card-point totals, `wasAbandoned: boolean` (true if all remaining players forfeited — no winner by gameplay), and `roomType` (denormalized from the Room aggregate for downstream filtering). |
+| `MatchGameStarted` | Emitted by `room-service` immediately after issuing `InitializeGame` to `game-engine` for each game in a match series. Provides an audit-trail anchor for "game N of match M has started" without relying on internal RPC traces. Payload: `matchId`, `roomId`, `gameId`, `gameNumber`, `startedAt`. |
 | `MatchGameCompleted` | Emitted between games within a match (after Game 1 or Game 2) when the match has not yet been decided. Carries the current game number and the next game number. |
 | `MatchCompleted` | A best-of-three match has concluded. Includes match winner and per-game results. |
 | `RoomCompleted` | All matches in the room are finished. Includes final room results. |
@@ -580,7 +581,8 @@ Room Gameplay                 Tournament Orchestration
      |                                    | 5. Check: all rooms in round done?
      |                                    |
      |                                    |  AllMatchesInRoundCompleted
-     |                                    |  (internal or published)
+     |                                    |  (published to tournament.lifecycle;
+     |                                    |   see CHANGELOG-design.md Change 18)
      |                                    |
      |                                    | 6. If remaining players > 10:
      |                                    |    Create next round, assign rooms

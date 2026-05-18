@@ -551,6 +551,8 @@ If room creation continues to fail after the retry budget is exhausted: the room
 
 **Recovery (escalation path).** An admin issues `ForceResolveRoom { roomId, reason: creation_failure, outcome: walkover }` or re-emits the `TournamentRoomAssigned` event. The domain must support an administrative resolution path for permanently-stuck rooms. This is a domain-level risk flagged in doc 08.
 
+**Architecture implementation of this escalation path (for reference — does not change domain semantics):** In the architecture, `room-service` places permanently-failed `TournamentRoomAssigned` messages on a dead-letter queue (`tournament.rooms.dlq`) after exhausting 3 retries. `tournament-service` monitors the DLQ; after a **5-minute room-creation timeout** with no `RoomCreated` acknowledgement, it emits `TournamentRoomResolved { reason: "creation_timeout" }` — the architectural form of the domain's `ForceResolveRoom` escalation. Note: this 5-minute creation timeout is distinct from the 2-hour `maxRoundDuration` timeout (`ForceResolveTimedOutRoom`), which applies only to rooms that successfully started but did not complete. See `spec/architecture/docs/03-bounded-contexts/tournament-orchestration.md` §Partial Failure Handling and §Round Advancement Saga.
+
 **Events emitted (failure path).**
 - `TournamentRoomAssigned` (TO — redelivered)
 - `RoomCreationFailed { roomId, reason, attemptNumber }` (RG — per failed attempt)

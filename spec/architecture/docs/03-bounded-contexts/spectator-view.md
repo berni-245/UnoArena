@@ -36,7 +36,15 @@ The ingestion (event consumption + ACL + materialization) and query (REST + SSE)
 | `/api/v1/tournaments/{id}/bracket` | GET | Public | Tournament bracket progression. |
 | `/api/v1/tournaments/{id}/bracket/stream` | GET (SSE) | Public | Live tournament bracket updates. |
 
-**Auth:** Spectator endpoints are public (no JWT required). Rate-limited per IP at the gateway.
+**Auth (per-route, by room `visibility`):**
+
+| Visibility | Auth on `GET /spectator/games/{id}` and `/stream` | Auth on `GET /lobby/rooms` and `/tournaments/{id}/bracket` |
+|------------|-----|-----|
+| `public`, `tournament` | None (anonymous SSE allowed); per-IP rate-limited at the gateway | None (anonymous) |
+| `unlisted` | None (anonymous, but `roomId` must be known out-of-band) | Not listed |
+| `private` | **Bearer JWT required.** `spectator-projection-service` enforces invitee ACL: the JWT's `playerId` must appear on the host-managed invitee list cached on the spectator projection (sourced from `gameplay.rooms` `RoomCreated`/`InviteeListUpdated` events). Anonymous or non-invitee requests return 403. | N/A (private rooms never appear in lobby) |
+
+The `spectator-projection-service` performs the visibility lookup before opening the SSE stream and rejects with HTTP 403 (`forbidden_not_invited`) when a private room request lacks a valid JWT or the JWT's `playerId` is not on the invitee list. See `05-client-connection-model.md` §5.2 (Room Visibility table) for the cross-reference and `04-integration-table.md` S8/S11/S13 for the auth treatment per row.
 
 ### Asynchronous (Kafka — consumed only)
 
@@ -174,3 +182,19 @@ On each incoming event:
 - Game projections are retained while the game is active. After `GameCompleted`, projection is kept for 24 hours (replay browsing) then archived or deleted.
 - Lobby listings are real-time only. Completed rooms are removed immediately.
 - Tournament brackets are retained until the tournament completes + 30 days.
+
+---
+
+## Upstream SSE Failover (regional-edge-proxy → spectator-projection-service)
+
+For high-spectator rooms, each `regional-edge-proxy` maintains 1 upstream SSE connection per game to `spectator-projection-service`. The following failure path applies when that upstream connection drops:
+
+| Step | Detail |
+|------|--------|
+| **Drop detection** | `regional-edge-proxy` detects the upstream SSE connection drop (TCP RST or graceful HTTP/2 stream close) within ≤ 5 s. |
+| **Client-side pause** | `regional-edge-proxy` immediately pauses fan-out to downstream spectators (no events pushed). Downstream clients see no events but remain connected (SSE keep-alive or browser hold). |
+| **Upstream reconnect** | `regional-edge-proxy` reconnects to `spectator-projection-service` (any healthy instance, load-balanced) with `Last-Event-ID: {last_event_id_received}`. Reconnect uses exponential backoff (100 ms, 500 ms, 2 s, 10 s) capped at 30 s. |
+| **Projection-service response** | The receiving `spectator-projection-service` instance looks up all spectator-projection events for this `gameId` with `sequenceNumber > last_event_id` from the materialized read model (PostgreSQL). It replays them in order before resuming live streaming. This lookup is a simple index read — no Kafka replay needed (the read model is always up-to-date within Kafka consumer lag). |
+| **Consumer group rebalance gap** | If the upstream SSE was served by a crashed instance, a Kafka consumer group rebalance occurs in parallel (typically 10–30 s). During this window, the new serving instance may lag by up to 30 s on the latest events. The `Last-Event-ID`-based replay from the read model covers events up to the last materialized state. Events processed by the crashed instance but not yet written to the read model may be missed; they will appear when the rebalance completes and the consumer catches up. Worst-case gap to downstream spectators: ≤ 30 s during a rebalance. |
+| **Regional isolation** | Each `regional-edge-proxy` has an independent upstream connection. A single `spectator-projection-service` crash affects at most the edge regions whose upstream happened to route to that instance — typically 1 of 30 instances, so at most ~10% of edges. The other 9 regions continue unaffected. |
+| **Finals guarantee** | For a 100k-spectator final with 10 regional edges: in the worst case (1 instance crash during finals), ≤ 10k spectators experience a gap of ≤ 30 s. This is acceptable for a non-interactive feed; no game state is lost (the read model is the source of truth). |

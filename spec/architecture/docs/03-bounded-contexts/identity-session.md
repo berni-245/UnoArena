@@ -75,6 +75,8 @@
 
 The `api-gateway` consults `rl:adaptive:*` keys on every authenticated request (Redis GET, same call as Layer 2 counter). Directive evaluation adds < 1 ms. On Redis unavailability, directives are skipped (fail-open for throttling, not fail-closed — availability takes precedence).
 
+**Residual risk on Redis unavailability:** The fail-open behaviour means that during a Redis outage, `block`-tier directives for suspended or banned players are not enforced by the adaptive throttle. Layer 1 (per-IP) and Layer 2 (per-user rate counter — also Redis-backed, so also degraded during a full Redis outage) continue to operate at whatever state they last held, but the specific "blocked banned player" directive — the layer most worth failing closed — is skipped. This is the same window acknowledged in `12-threat-model.md` D-1 residual risk. Operators should treat Redis cluster unavailability as a security-relevant event and escalate promptly; the 30-second heartbeat at the gateway and session DB validation remain active during Redis outages as a backstop. The fail-open decision is preserved because refusing ALL authenticated requests during a Redis outage would be a self-inflicted DoS; the trade-off is an accepted residual risk, not an oversight.
+
 ---
 
 ## Dependencies on Other Contexts
@@ -153,6 +155,13 @@ To close the 200–300 ms (worst-case 30 s on missed event) gap during which a s
 1. The JWT issued by `identity-service` carries both `playerId` **and** `sessionId` (already in the issuance design — now made authoritative for command validation).
 2. `api-gateway` records `(playerId, currentSessionId)` in Redis on connection upgrade. On every gameplay command relayed to `game-engine`, the gateway forwards `sessionId` in the mTLS-injected context.
 3. `game-engine`'s command middleware checks `sessionId` against an in-memory invalidated-session set (populated by the `SessionInvalidated` Kafka consumer with a 24 h TTL). Mismatch → `CommandRejected { reason: "session_superseded" }`, connection closed.
+
+   **Invalidated-session set — sizing and eviction:**
+   - **Bound:** The set is capped at **1,000,000 entries** with LRU eviction. At 64 bytes per `sessionId` UUID + ~16 bytes overhead, this is **~80 MB per `game-engine` instance** — within budget for instances sized at 4–8 GB (which must also hold up to ~500 game aggregates in memory at ~150 KB each, see §8.2.2 and §11.1.1).
+   - **Entry lifetime:** Each entry carries an absolute `expiresAt` timestamp (insertedAt + 24 h). A background goroutine sweeps expired entries every 5 minutes, keeping the working set small during off-peak hours.
+   - **Cold-start (rolling restart):** On startup, the `game-engine` instance replays `SessionInvalidated` events from its Kafka consumer group's last committed offset. Since the consumer group maintains per-partition offsets across restarts, replay is bounded to events since the last checkpoint (typically seconds to minutes of lag), not a full 24 h history. Commands arriving before the consumer catches up fall back to path 4 (synchronous `/sessions/validate` call), which is safe and adds ≤ 5 ms.
+   - **Oversized surge:** If a large-scale session-invalidation wave (e.g., forced logout of all sessions after a security incident) fills the set past 1M, LRU eviction removes the oldest entries. Evicted entries are safe: their window has either already expired (24 h TTL) or the fallback path 4 catches the session. The 30 s gateway heartbeat serves as the outer safety net.
+
 4. On Redis miss (cold instance), `game-engine` calls `identity-service` `/sessions/validate` synchronously (cache-fill, ≤ 5 ms p99 from the hot cache). Fail-closed on validate timeout.
 
 This makes the single-active-session invariant authoritative on every in-flight command, not just at connection-upgrade time. The 30 s heartbeat fallback becomes a defense-in-depth backstop rather than the primary control.

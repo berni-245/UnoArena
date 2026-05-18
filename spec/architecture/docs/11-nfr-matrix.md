@@ -126,6 +126,21 @@ The spectator view is eventually consistent with a deliberate delay (A35).
 
 ---
 
+### 11.1.9 `gameplay.events` Consumer-Group Lag SLOs
+
+All four consumer groups on `gameplay.events` operate independently. Each group must define a maximum acceptable lag before backpressure or scaling is triggered:
+
+| Consumer Group | Lag SLO (p95) | Backpressure Trigger | Rationale |
+|---------------|--------------|---------------------|-----------|
+| `spectator-projection-service` | **≤ 500 ms** (see §11.1.8) | Add consumer instances when lag > 1 s for > 30 s | Spectator UX degrades visibly at > 1 s lag; SSE pushes are user-facing. |
+| `ranking-service` | **≤ 10 s** (see §11.1.7) | Add consumer instances when lag > 30 s sustained | Elo is eventual; < 10 s is fast enough for post-game leaderboard refresh. |
+| `tournament-service` | **≤ 5 s** | Add consumer instances when lag > 15 s sustained | `PlayerForfeited` on `gameplay.events` drives tournament elimination; delays here push back advancement. Acceptable lag is longer than spectator but shorter than ranking because tournament state gates round progression. |
+| `audit-service` | **≤ 30 s** under normal load; **≤ 5 minutes** during end-of-round burst | Add consumer instances when lag > 5 minutes sustained | Audit is non-interactive append-only; no player-facing impact. Burst tolerance is higher than other consumers. |
+
+**Lag alerting:** Each consumer group exposes a `kafka_consumer_group_lag` metric (per partition). Alerting thresholds are set at 2× the SLO value. Sustained breaches trigger auto-scaling (add consumer instances within the same consumer group, up to the partition count). If the partition count is the bottleneck, the on-call team increases `gameplay.events` partition count (current target: ≥ 256 per §8.2.4).
+
+---
+
 ## 11.2 Throughput Targets per Service
 
 | Service | Peak Throughput | Scaling | Notes |
@@ -136,10 +151,10 @@ The spectator view is eventually consistent with a deliberate delay (A35).
 | `tournament-service` | ~100,000 `RoomCompleted` events within a round window | Horizontal; partitioned by `tournamentId` | Atomic counter with idempotency guard; burst is bounded |
 | `round-kickoff-worker` | **10,000 `TournamentRoomAssigned`/s** (10 shards × 1k/s) | Horizontal; sharded by player-range hash | Rate-controlled; backpressure from Kafka consumer lag |
 | `ranking-service` | ~100,000 `GameCompleted` events per round end | Horizontal; Kafka consumer group | Per-player atomic write; independent across players |
-| `spectator-projection-service` | ~25,000 events/s ingested; fan-out to ~5M SSE | Horizontal; consumer group + edge SSE proxies | SSE fan-out is the bottleneck, not ingestion |
-| `audit-service` | ~30,000 events/s (all topics combined) | Horizontal; consumer group | Append-only writes; scales with ClickHouse/PostgreSQL write throughput |
+| `spectator-projection-service` | ~300,000 events/s ingested (`gameplay.events` at corrected 3 events/cmd rate); fan-out to ~5M SSE (avg) or ~300k SSE pushes/s for finals room | Horizontal; consumer group + edge SSE proxies | SSE fan-out is the bottleneck, not ingestion. See §8.2.3/§8.5. |
+| `audit-service` | ~300,000 events/s (`gameplay.events` dominates; other topics ~1k/s) | Horizontal; consumer group | Append-only batch writes; scales with ClickHouse/PostgreSQL write throughput. See §8.2.5. |
 | `identity-service` | ~50,000 token validations/s (mostly Redis, not `identity-service`) | Horizontal; Redis absorbs read load | New login and registration much lower frequency |
-| Kafka `gameplay.events` topic | **~25,000 events/s** sustained; **~60,000 events/s** burst at round-start (deck init + deal for 100k games, ~5 s window per §8.3); round-end is a traffic decrease, not a burst, as games stop generating card-play events | Partitioned by `gameId`; target ≥ 128 partitions | Round-start burst is the true peak; Kafka buffers absorb the ~5 s spike. Consumers sized for 25k/s sustained (4× fan-out → ~100k events/s read rate) comfortably handle 60k/s producer burst. |
+| Kafka `gameplay.events` topic | **~300,000 events/s** sustained (100k games × 3 events/cmd × 1 cmd/s; see §8.2.3); burst at round-start ~600k events/s for ~5 s (deck-init + deal for 100k games); round-end is a traffic decrease | Partitioned by `gameId`; target ≥ 256 partitions; 4× fan-out → ~1.2M events/s read rate | Round-start burst is the true peak; Kafka buffers absorb the ~5 s spike. See §8.2.4 for per-group lag SLOs (§11.1.9). |
 
 ---
 

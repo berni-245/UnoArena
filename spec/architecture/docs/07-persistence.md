@@ -6,12 +6,14 @@
 
 ## 7.1 Design Principle: Database-Per-Context
 
-Every bounded context owns its own PostgreSQL database (or dedicated store). No cross-context joins. Cross-context data flows exclusively via Kafka events. This ensures:
+Every **bounded context** owns its own PostgreSQL database (or dedicated store). No cross-context joins. Cross-context data flows exclusively via Kafka events. This ensures:
 
 1. **Independent schema evolution** — each context migrates without coordinating with others.
 2. **Independent scaling** — Room Gameplay needs high write throughput; Identity & Session is read-heavy.
 3. **Fault isolation** — a runaway query in audit does not lock tables in gameplay.
 4. **Enforced bounded context boundaries** — accidental coupling via shared tables is structurally impossible.
+
+**Scope: per-context, not per-service.** Multiple deployable services that belong to the *same* bounded context may share that context's database. This is intentional and does not violate the isolation principle — it is the context boundary that provides isolation, not the service boundary. For example, `timer-service` is a deployable within the **Room Gameplay** context (see the `rg_ctx` boundary in `02-container-view.md` §2.1) and therefore reads/writes the RG PostgreSQL database (`timer_deadlines` table). It holds its own DB credentials scoped only to the tables it needs (see §7.9 credential isolation), but it is not a separate bounded context and does not require a separate database.
 
 ---
 
@@ -56,15 +58,19 @@ Every bounded context owns its own PostgreSQL database (or dedicated store). No 
 
 ## 7.3 Room Gameplay (RG)
 
+### Deployment Topology
+
+RG PostgreSQL is **sharded by `gameId` range from day one** for tournament-capable deployments: a minimum of 4 primary shards (each with 2 read replicas) for the 1M-player profile, scaling to ≥ 8 for the 2M total-player profile (§8.7). Each `game-engine` instance is pinned (via consistent-hash routing from the gateway, `05-client-connection-model.md` §5.8) to a `gameId` range and writes only to its shard's primary. There is no cross-shard transaction or join — every table below is replicated *per shard*, not pooled. The single-shard topology is supported only for casual-only deployments (≤ 50k concurrent games).
+
 ### Primary Store
 
 | Technology | Tables | Data Owned |
 |-----------|--------|------------|
-| PostgreSQL | `game_events` | `eventId`, `gameId`, `sequenceNumber`, `eventType`, `payload` (JSONB), `signature` (HMAC-SHA256), `timestamp`. **Append-only.** Partitioned by `gameId`. |
+| PostgreSQL (per shard) | `game_events` | `eventId`, `gameId`, `sequenceNumber`, `eventType`, `payload` (JSONB), `signature` (HMAC-SHA256), `timestamp`. **Append-only.** Partitioned by `gameId`. |
 | | `outbox` | `eventId`, `topic`, `partitionKey`, `payload`, `delivered` (boolean). Shared TX with `game_events`. |
 | | `rooms` | `roomId`, `status`, `hostPlayerId`, `maxPlayers`, `roomType` (casual/tournament), `tournamentId`, `createdAt` |
 | | `player_slots` | `roomId`, `playerId`, `joinedAt` |
-| | `matches` | `matchId`, `roomId`, `currentGameNumber`, `perPlayerWins` (JSONB), `gameResults` (JSONB), `status` |
+| | `matches` | `matchId`, `roomId`, `currentGameNumber`, `perPlayerWins` (JSONB), `gameResults` (JSONB), `status`, `pendingNextGameId` (UUID, nullable — pre-generated `gameId` for game N+1, written by `room-service` before issuing `InitializeGame`; serves as the idempotency key for crash-recovery: if `room-service` crashes after generating the ID but before the RPC succeeds, retry uses the same pre-stored `gameId`) |
 | | `timer_deadlines` | `deadlineId`, `gameId`, `type` (uno_challenge/wdf_challenge/reconnection/turn_timer), `playerId`, `expiresAt`, `version`, `fired` (boolean) |
 | | `command_idempotency` | `commandId`, `gameId`, `response`, `createdAt`. TTL: 24 h. |
 
@@ -101,7 +107,7 @@ The **transactional outbox** ensures log-before-broadcast:
 
 ### Read Path for Immutable Game Log (Dispute Resolution)
 
-The `game_events` table is the authoritative source for game replay and dispute resolution.
+**System-of-record hierarchy:** `game_events` in RG is the **single authoritative source of truth** for game replay and dispute resolution. It is where events are HMAC-signed at write time and where the sequence-number uniqueness constraint is enforced. The `game_log` table in the AL database is an **ingested copy** (a derived read model) used by `audit-service` for query isolation — it allows audit queries, compliance exports, and HMAC-chain verification without touching the RG primary. If the two ever diverge (e.g., due to an at-least-once redelivery edge case), `game_events` in RG is the ground truth. The AL copy is authoritative for field-level redaction and role-based access control (those are AL-layer responsibilities), but not for the underlying game state.
 
 **Who may query:**
 
@@ -114,7 +120,7 @@ The `game_events` table is the authoritative source for game replay and dispute 
 
 **Access control:**
 - No direct DB access for any human actor. All queries go through `audit-service` scoped APIs.
-- `audit-service` reads from a read replica of `game_events` (or its own ingested copy in `game_log`).
+- `audit-service` reads from its own ingested `game_log` copy (primary query path) or from a RG read replica (fallback for real-time reconciliation). The AL `game_log` is preferred for performance isolation so audit queries do not add read load to the RG primary.
 - Every audit query is itself logged in the audit trail (meta-audit).
 
 ### Read Models / Caches
@@ -164,6 +170,7 @@ erDiagram
         jsonb perPlayerWins
         jsonb gameResults
         string status
+        uuid pendingNextGameId "nullable; pre-generated for crash-recovery idempotency"
     }
 
     game_events {
@@ -359,7 +366,20 @@ None. Tournament state is low-volume and queried directly from PostgreSQL. Brack
 
 - `game_log`: 1 year active → cold storage (S3/GCS, Parquet). Archived logs queryable via compliance export API.
 - `audit_trail`: 2 years minimum (compliance requirement). Older entries archived.
-- `processed_events`: Pruned after 7 days.
+- `processed_events`: Pruned after 7 days. **Dependency:** all Kafka topics consumed by `audit-service` must have a retention period of ≤ 7 days so that expired deduplication records are never re-encountered during normal operation. Any controlled replay beyond 7 days requires restoring `processed_events` records from backup before replay. See `audit-game-log.md` §Retention for the full constraint statement.
+
+### Data-Subject Erasure (GDPR / Right to Be Forgotten)
+
+Immutable append-only tables cannot be deleted from, but the right to erasure is satisfied via **pseudonymisation**:
+
+1. Upon a verified right-to-erasure request, `audit-service` replaces all occurrences of the data subject's `playerId` in `game_log`, `audit_trail`, and `compliance_meta_audit` with a derived one-way token (`erased_player_{sha256(playerId + erasure_salt)}`). The salt is discarded after the operation.
+2. The `player_identities` row is deleted from the IS database (or flagged `erased`), destroying the `playerId → real identity` mapping. Re-identification is computationally infeasible.
+3. HMAC signatures are not recomputed; existing signatures reflect the pre-erasure identifier. Signature status is set to `pseudonymised` on affected rows — this is an expected, documented state, not a tamper flag.
+4. Rows required for ongoing legal proceedings are retained pseudonymised under GDPR Article 17(3)(b) for the minimum compliance period.
+5. The erasure action is itself recorded in `compliance_meta_audit` (who requested, when, which `playerId`, row count affected).
+6. Processing deadline: ≤ 30 days from verified request (GDPR Article 12(3)).
+
+See `12-threat-model.md` I-6 for the full STRIDE analysis of this path.
 
 ---
 

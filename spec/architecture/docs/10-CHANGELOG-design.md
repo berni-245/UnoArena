@@ -147,7 +147,68 @@ The architecture document names *how* expiry firing survives crashes — via a d
 
 ---
 
+### Change 17 — `MatchGameStarted` Event Added to Room Gameplay Produced Catalog
+
+**File:** `spec/domain/docs/02-bounded-contexts-and-context-map.md` — Section 2.1.2 (Events Produced by RG)
+**File:** `spec/domain/docs/04-commands-and-domain-events.md` — Section 4.3 (Room Gameplay events)
+
+**Deliverable:** *Deliverable 4 — Commands and domain events catalog* | *Deliverable 2 — Bounded contexts and context map*
+
+**Delta:** The architecture (`room-gameplay.md` §Asynchronous, `gameplay.rooms` produced row) publishes `MatchGameStarted` on `gameplay.rooms`. This event was absent from the domain's produced-events table (§2.1.2) and the commands/events catalog (§4.3).
+
+| New Event | Trigger | Emitter |
+|-----------|---------|---------|
+| `MatchGameStarted` | `room-service` issues `InitializeGame` RPC to `game-engine` for game N in a match series | `room-service` on `gameplay.rooms` |
+
+**Why:** The architecture requires an audit-trail anchor for "game N of match M has started" that is traceable through Kafka without relying on internal RPC trace logs. Without this named event in the domain catalog, the producer→consumer contract is undocumented at the domain level. Consumers: `audit-service` (correlation between match-start and the subsequent `GameCompleted` for that `gameId`).
+
+**Non-negotiable confirmation:** No domain invariants are weakened. `MatchGameStarted` is additive — it records an event that already occurs (the `InitializeGame` RPC) but was previously invisible to asynchronous consumers. The `MatchGameCompleted` flow and match-series rules (INV-M-04, INV-R-08) are unchanged.
+
+---
+
 ## Part II — Tournament Orchestration Context (TO)
+
+### Change 20 — `command_idempotency` TTL: Fixed 24 h Replaces Game-Duration Scoping
+
+**File:** `spec/domain/docs/07-consistency-and-recovery-strategy.md` — Section 7.2.1 (command idempotency note)
+
+**Deliverable:** *Deliverable 7 — Consistency and recovery strategy*
+
+**Delta:** The domain design (doc 07 §7.2.1) stated: "Entries are retained for the duration of the game. Once `GameCompleted` is processed and the aggregate is sealed, the idempotency store may be discarded." The architecture (`room-gameplay.md` §Persistence, `07-persistence.md` §7.3) uses a fixed **24-hour TTL** rather than game-duration scoping.
+
+**Why:** Game-duration scoping requires `game-engine` to actively delete idempotency records on `GameCompleted`, which adds a coordination step to the command pipeline. A fixed 24-hour TTL is simpler: expired records are pruned by a background job without coupling to the Game aggregate's lifecycle. The risk of duplicate processing after TTL expiry within a game is negligible for realistic game durations (tournament games are ≤ 2 hours; casual games rarely exceed 1 hour), since the 24-hour window far exceeds any expected game lifetime. The only edge case — a casual abandoned room sitting in `Waiting` for >24 hours — would allow a very old retried command to be re-processed; this is acceptable because (a) `Waiting`-state rooms accept no gameplay commands, and (b) a 24-hour-old retry is operationally implausible. The domain's "may be discarded after GameCompleted" is preserved semantically: the TTL causes discard within 24 hours of creation, which in practice is after game completion.
+
+**Non-negotiable confirmation:** Command deduplication (V14, doc 07 §7.2.1) is preserved within all realistic game durations. The 24-hour window is a superset of any expected game lifetime, ensuring no duplicate processing for in-progress games.
+
+---
+
+### Change 19 — `SpectatorProjectionUpdated` Demoted from Mandatory to Optional in Audit Subscription
+
+**File:** `spec/domain/docs/02-bounded-contexts-and-context-map.md` — Section 2.1.6 (Audit & Game Log — Events Consumed)
+
+**Deliverable:** *Deliverable 2 — Bounded contexts and context map*
+
+**Delta:** The domain design (doc 02 §2.1.6) states that `audit-service` consumes "All events from Spectator View." The architecture (`spectator-view.md` §Asynchronous, Produced) specifies only one event from Spectator View: `SpectatorProjectionUpdated` — and marks it as "Low value; can be omitted in initial implementation." This softens the domain's "all events" subscription to an optional single low-value event.
+
+**Why:** Spectator View events are derived, privacy-stripped projections of upstream Room Gameplay events. Auditing them provides no forensic or compliance value that is not already covered by the upstream `gameplay.events` audit trail (which `audit-service` already consumes fully). Forcing `audit-service` to subscribe to a derived projection adds a consumer dependency on `spectator-projection-service` — the exact opposite of the audit service's role as a universal downstream conformist. The domain's "all events from Spectator View" was over-specified; the architecture correctly reduces this to the single named event. The omission does not weaken any domain invariant — INV-GL-01 (append-only) and INV-GL-05 (restricted access) are unchanged, and the audit trail for all actual gameplay actions is complete via `gameplay.events`.
+
+**Non-negotiable confirmation:** The complete game and action audit trail is preserved via `gameplay.events`. The optional `SpectatorProjectionUpdated` event covers only operational confirmation of projection materialization — its absence leaves no compliance gap.
+
+---
+
+### Change 18 — `AllMatchesInRoundCompleted` Promoted from "Internal or Published" to Published
+
+**File:** `spec/domain/docs/02-bounded-contexts-and-context-map.md` — Section 2.3.2 (flow diagram comment)
+
+**Deliverable:** *Deliverable 2 — Bounded contexts and context map*
+
+**Delta:** The domain design (doc 02 §2.3.2, tournament round-advancement flow) labelled `AllMatchesInRoundCompleted` as "(internal or published)", leaving the publication decision open. The architecture (`tournament-orchestration.md` §Asynchronous produced events) resolves this to **published** on the `tournament.lifecycle` Kafka topic. The flow diagram comment in doc 02 §2.3.2 is updated to reflect this decision.
+
+**Why:** The `spectator-projection-service` consumes `tournament.lifecycle` to update the bracket projection when a round ends. Keeping `AllMatchesInRoundCompleted` internal (not published) would require an additional synchronous query or a separate signal, increasing coupling. Publishing it on the existing `tournament.lifecycle` topic is the minimal-footprint approach — it adds a row to the existing consumer subscriptions at zero new infrastructure cost. The event is produced in the same atomic operation as the counter check (already SERIALIZABLE), so publication ordering is guaranteed.
+
+**Non-negotiable confirmation:** INV-T-02 (round may not advance until all rooms complete) is unchanged. Publishing the event does not change when it is emitted — only that external consumers can observe it.
+
+---
 
 ### Change 7 — `OpenRegistration` Command and `RegistrationOpened` Event Added
 
@@ -381,6 +442,10 @@ INV-AT-05 is updated: "The audit trail is retained for a minimum of 2 years. Gam
 | 5 | *(no domain file changed)* | Deliverable 7 | **Architecture-only** — transactional outbox implements Option B; domain invariant (V12, INV-GL-03) already correct | INV-GL-03 satisfied by architecture |
 | 6 | *(no domain file changed)* | Deliverable 3, Deliverable 7 | **Architecture-only** — dedicated scheduling component implements timer durability; domain Value Objects (`deadline` field) and invariants (INV-G-06, INV-G-11) already correct | 5s/60s timer invariants satisfied by architecture |
 | 7 | `02-bounded-contexts.md` §2.1.3; `04-commands.md` §4.2.3 | Deliverable 4, Deliverable 2 | **Added command + event** — `OpenRegistration` / `RegistrationOpened` | INV-T-10 tightened |
+| 17 | `02-bounded-contexts.md` §2.1.2; `04-commands.md` §4.3 | Deliverable 4, Deliverable 2 | **Added event** — `MatchGameStarted` to RG produced-events catalog | No invariants weakened; additive |
+| 18 | `02-bounded-contexts.md` §2.3.2 flow diagram | Deliverable 2 | **Disambiguated publication** — `AllMatchesInRoundCompleted` resolved from "internal or published" to published on `tournament.lifecycle` | INV-T-02 unchanged |
+| 19 | `02-bounded-contexts.md` §2.1.6 | Deliverable 2 | **Subscription softened** — Audit's "all SV events" reduced to optional `SpectatorProjectionUpdated`; no compliance gap since gameplay.events audit is complete | INV-GL-01, INV-GL-05 unchanged |
+| 20 | `07-consistency.md` §7.2.1 | Deliverable 7 | **TTL alignment** — fixed 24 h TTL replaces game-duration scoping for `command_idempotency`; 24 h is a practical superset of all realistic game lifetimes | V14 preserved within all realistic game durations |
 | 8 | *(no domain file changed)* | Deliverable 7 | **Architecture-only** — sharded fan-out implements "emit TournamentRoomAssigned per room"; domain saga step already correct | INV-T-02 unchanged; idempotent room creation already specified in domain |
 | 9 | `04-commands.md` §4.3; `03-aggregates.md` §3.2.3 | Deliverable 4, Deliverable 3 | **Payload addition** — pre-generated `roomId` in `TournamentRoomAssigned` | At-least-once idempotency (doc 07 §7.2.2) strengthened |
 | 10 | `02-bounded-contexts.md` §2.3.4 | Deliverable 2 | **Domain clarification** — `SessionInvalidated` must reach the live-connection holder, not only the game service | INV-S-01 unchanged; domain delivery requirement made explicit |

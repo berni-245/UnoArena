@@ -28,7 +28,7 @@ C4Container
         Container(room, "room-service", "Application Service", "Room lifecycle (waiting→completed), match coordination (best-of-3 scoreline, next-game, early termination), player slots")
         Container(engine, "game-engine", "Application Service", "Event-sourced game state machine: deck/RNG, hands, turns, plays, challenges, sequence-number enforcement, transactional outbox (log-before-broadcast)")
         Container(timer, "timer-service", "Worker", "Durable domain timers: 5s challenge windows, 60s reconnection, 30/60s turn timer. Polls persisted deadlines. Idempotent expiry.")
-        ContainerDb(rg_db, "RG PostgreSQL", "PostgreSQL", "Event store (game log), outbox, room state, match state, timer deadlines")
+        ContainerDb(rg_db, "RG PostgreSQL (sharded)", "PostgreSQL — 4+ primary shards by gameId range, 2 replicas each", "Event store (game log), outbox, room state, match state, timer deadlines. Sharded by gameId range from day one for tournament-capable deployments (≥4 shards); single-shard mode reserved for casual-only deployments ≤50k games. See 08-capacity-sketch.md §8.2.2/§8.6.")
     }
 
     System_Boundary(to_ctx, "Tournament Orchestration Context") {
@@ -83,7 +83,7 @@ C4Container
     Rel(engine, rg_db, "Event store append + outbox write (same TX)")
     Rel(timer, rg_db, "Poll persisted deadlines, mark fired")
     Rel(timer, engine, "Idempotent expiry commands: ChallengeWindowExpired, ReconnectionTimerExpired, TurnTimerExpired")
-    Rel(engine, kafka, "Outbox relay → Publish game events", "topics: gameplay.events, gameplay.games")
+    Rel(engine, kafka, "Outbox relay → Publish game events", "topics: gameplay.events, gameplay.games, gameplay.audit")
     Rel(room, kafka, "Publish: RoomCreated, RoomCompleted, MatchCompleted", "topic: gameplay.rooms")
     Rel(room, kafka, "Subscribe: GameCompleted, MatchGameCompleted → advance match state", "topic: gameplay.games")
 
@@ -92,7 +92,7 @@ C4Container
     Rel(tournament, kafka, "Subscribe: MatchCompleted, RoomCompleted", "topic: gameplay.rooms")
     Rel(tournament, kafka, "Subscribe: PlayerForfeited (tournament elimination)", "topic: gameplay.events")
     Rel(tournament, kafka, "Subscribe: PlayerSuspended, PlayerBanned", "topic: identity.sessions")
-    Rel(engine, kafka, "Subscribe: PlayerSuspended, PlayerBanned → immediate forfeit if mid-game", "topic: identity.sessions")
+    Rel(engine, kafka, "Subscribe: SessionInvalidated → PlayerDisconnected + 60s reconnection timer (reconnect fails on invalid session → eventual forfeit); PlayerSuspended, PlayerBanned → immediate PlayerForfeited (no reconnection window)", "topic: identity.sessions")
     Rel(room, kafka, "Subscribe: PlayerSuspended, PlayerBanned → remove player from waiting room", "topic: identity.sessions")
     Rel(tournament, kafka, "Publish: TournamentRoundCreated, PlayerAdvanced/Eliminated", "topic: tournament.lifecycle")
     Rel(kickoff, kafka, "Publish: TournamentRoomAssigned (rate-limited, sharded)", "topic: tournament.rooms")
@@ -132,7 +132,7 @@ C4Container
 | `tournament.kickoff-work` | `roundId` (or player-range hash) | `tournament-service` | `round-kickoff-worker` | Internal work-queue for Round Kickoff saga. Carries `{ tournamentId, roundId, roomAssignment: { roomId, playerIds[], roomConfig } }`. Retention: 24 h (transient). ACL: producer = `tournament-service` only; consumer group = `round-kickoff-worker` shards. Owned by Tournament Orchestration context. |
 | `gameplay.audit` | `gameId` | `game-engine` (via outbox relay) | `audit-service` | Audit-only payload-detail channel for `GameCompleted`: full final-hand contents, deck shuffle seed, signed envelope. ACL-restricted (single consumer group = `audit-service`). Separated from `gameplay.games` to prevent hand/seed leakage to `ranking-service` / `spectator-projection-service` / `room-service`. |
 
-| `tournament.rooms.dlq` | `roomId` | `room-service` (on permanent creation failure, after 3 retries) | `tournament-service` | Dead-letter queue for `TournamentRoomAssigned` messages that `room-service` cannot process after exhausting retries. Each DLQ message carries the original `TournamentRoomAssigned` payload plus `failureReason` and `attemptCount`. `tournament-service` polls this topic; on receipt it logs the failure, marks the room as `creation_failed` in `tournament_room_results`, and waits for the 5-minute round-kickoff timeout to trigger `ForceResolveTimedOutRoom` (the existing escalation path in P1). Retention: 24 h. |
+| `tournament.rooms.dlq` | `roomId` | `room-service` (on permanent creation failure, after 3 retries) | `tournament-service` | Dead-letter queue for `TournamentRoomAssigned` messages that `room-service` cannot process after exhausting retries. Each DLQ message carries the original `TournamentRoomAssigned` payload plus `failureReason` and `attemptCount`. `tournament-service` polls this topic; on receipt it logs the failure, marks the room as `creation_failed`, and after the **5-minute room-creation timeout** emits `TournamentRoomResolved { reason: "creation_timeout" }`. **Note:** this 5-minute creation-timeout path is distinct from `ForceResolveTimedOutRoom`, which applies only to rooms that *did* start (game running) but failed to complete within the 2-hour `maxRoundDuration` (see `tournament-orchestration.md` §Round Advancement Saga). The two timeouts address different lifecycle stages. Retention: 24 h. |
 
 **Ordering guarantees:** Partitioning by aggregate ID (`gameId`, `roomId`, etc.) ensures total ordering of events within a single aggregate. Cross-aggregate ordering is eventual.
 

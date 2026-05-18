@@ -58,7 +58,7 @@ Rate limiting is enforced at four layers, each progressively closer to business 
 |---------------|-------|-----------|
 | REST API requests | 100 req/s per IP | General abuse prevention |
 | WebSocket messages | 50 msg/s per IP | Prevent command flooding |
-| SSE connections | 20 concurrent per IP | Prevent connection exhaustion |
+| SSE connections (anonymous / public rooms) | 20 concurrent per IP | Prevent connection exhaustion. **NAT / tournament household note:** 20 connections from one IP is a plausible legitimate scenario (e.g., 4 household members × 5 tabs each during tournament finals). To avoid false throttling: if the SSE request carries a valid Bearer JWT, the connection counts against a **per-(IP, playerId) cap of 5 concurrent SSE streams** rather than the shared per-IP pool — effectively giving each authenticated user 5 personal slots independent of other users behind the same NAT. Anonymous connections (no JWT) share the 20-connection per-IP pool. This separates household spectators without raising the unauthenticated cap. |
 | Login attempts (`POST /sessions`) | 10/min per IP | Brute-force credential protection |
 | Registration (`POST /players`) | 5/min per IP | Bot registration prevention |
 

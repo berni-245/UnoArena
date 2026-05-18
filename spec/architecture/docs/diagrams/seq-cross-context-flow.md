@@ -17,8 +17,13 @@ sequenceDiagram
     participant RK as ranking-service<br/>(Ranking & Statistics)
     participant SP as spectator-projection<br/>(Spectator View)
 
-    Note over GE: Player empties hand → Game Over
-    GE->>GE: Emit GameCompleted {<br/>  gameId, placements,<br/>  wasAbandoned: false,<br/>  roomType: "tournament"<br/>}
+    alt HAPPY PATH: Tournament game completed normally (wasAbandoned: false)
+        Note over GE: Player empties hand → Game Over
+        GE->>GE: Emit GameCompleted {<br/>  wasAbandoned: false,<br/>  roomType: "tournament"<br/>}
+    else ALL-FORFEIT PATH: Every player forfeited (wasAbandoned: true)
+        Note over GE: All players forfeited (disconnection /<br/>suspension) — no gameplay winner
+        GE->>GE: Emit GameCompleted {<br/>  wasAbandoned: true,<br/>  roomType: "tournament",<br/>  placements: [] (no winners)<br/>}
+    end
 
     Note over GE,K: Event store + outbox (same TX)<br/>Outbox relay publishes
     GE->>K: GameCompleted<br/>topic: gameplay.games<br/>key: gameId
@@ -26,36 +31,48 @@ sequenceDiagram
     par room-service: Match Series Evaluation
         K->>RS: GameCompleted
         RS->>RS: Lookup match by gameId
-        RS->>RS: Update scoreline:<br/>Player A: wins=2 (best-of-3)
-        alt Early termination (2 wins in 2-player)
-            RS->>RS: MatchCompleted (early termination)
-        else Game 3 needed
-            RS->>RS: MatchGameCompleted<br/>→ InitializeGame(game 3) to game-engine
+        alt wasAbandoned: false — normal game outcome
+            RS->>RS: Update scoreline:<br/>Player A: wins=2 (best-of-3)
+            alt Early termination (2 wins in 2-player)
+                RS->>RS: Emit MatchCompleted (early termination)
+            else Game 3 needed
+                RS->>RS: Emit MatchGameCompleted<br/>→ InitializeGame(game 3) to game-engine
+            end
+            RS->>K: MatchCompleted {<br/>  wasAbandoned: false,<br/>  rankings: [{playerId, placement}]<br/>}<br/>topic: gameplay.rooms
+        else wasAbandoned: true — all players forfeited
+            RS->>RS: No scoreline update (no winner)<br/>Match immediately concluded
+            RS->>K: MatchCompleted {<br/>  wasAbandoned: true,<br/>  rankings: [] (no placements)<br/>}<br/>topic: gameplay.rooms
         end
-        RS->>K: MatchCompleted {<br/>  matchId, roomId,<br/>  rankings: [{playerId, placement}]<br/>}<br/>topic: gameplay.rooms
-        RS->>K: RoomCompleted { roomId }<br/>topic: gameplay.rooms
+        RS->>K: RoomCompleted { roomId, wasAbandoned }<br/>topic: gameplay.rooms
     and ranking-service: Elo Filter
         K->>RK: GameCompleted
-        RK->>RK: Check roomType == "tournament"<br/>→ SKIP Elo computation
-        RK->>RK: Update player statistics only<br/>(gamesPlayed++, placement tracking)
+        RK->>RK: roomType=="tournament" OR wasAbandoned==true<br/>→ SKIP Elo (both cases excluded)
+        RK->>RK: Update player statistics only<br/>(gamesPlayed++, abandoned count if wasAbandoned)
     and spectator-projection: Game Update
         K->>SP: GameCompleted
         SP->>SP: Update SpectatorGameProjection<br/>gamePhase → "completed"<br/>Strip final hand contents
     end
 
     Note over TS: Tournament Round Progression
-    K->>TS: RoomCompleted { roomId }
+    K->>TS: RoomCompleted { roomId, wasAbandoned }
     TS->>TS: Atomic: UPDATE tournament_rounds<br/>SET completed_rooms += 1<br/>WHERE roundId = $1<br/>RETURNING completed_rooms, total_rooms
 
     Note over TS: Dedup: UNIQUE(roundId, roomId)<br/>prevents double-increment
+    Note over TS: RoomCompleted increments counter<br/>regardless of wasAbandoned—<br/>the room is done either way
 
     alt completed_rooms == total_rooms
         TS->>TS: AllMatchesInRoundCompleted
         TS->>K: AllMatchesInRoundCompleted<br/>topic: tournament.lifecycle
 
-        TS->>TS: Evaluate advancement per room:<br/>Top 3 by matchWins →<br/>cardPoints → completionTime
-        TS->>K: PlayerAdvanced (per advancing player)<br/>topic: tournament.lifecycle
-        TS->>K: PlayerEliminated (per eliminated player)<br/>topic: tournament.lifecycle
+        TS->>TS: Evaluate advancement per room
+        alt Normal rooms (wasAbandoned: false)
+            TS->>TS: Top 3 by matchWins →<br/>cardPoints → completionTime → advance
+            TS->>K: PlayerAdvanced (per advancing player)<br/>topic: tournament.lifecycle
+            TS->>K: PlayerEliminated (per non-advancing player)<br/>topic: tournament.lifecycle
+        else Abandoned rooms (wasAbandoned: true)
+            Note over TS: ALL players in abandoned room<br/>are recorded as forfeit losses → eliminated
+            TS->>K: PlayerEliminated (for EVERY player<br/>in the abandoned room, reason: forfeit)<br/>topic: tournament.lifecycle
+        end
 
         alt remainingPlayers > 10
             TS->>TS: CreateRound(nextRoundNumber)
@@ -75,14 +92,16 @@ sequenceDiagram
             TS->>TS: CreateFinalRoom
             TS->>K: FinalRoomCreated<br/>topic: tournament.lifecycle
             TS->>K: TournamentRoomAssigned (single room)<br/>topic: tournament.rooms
+        else remainingPlayers == 0 (all forfeited in final)
+            TS->>K: TournamentCompleted {<br/>  reason: "all_forfeited"<br/>}<br/>topic: tournament.lifecycle
         end
     else completed_rooms < total_rooms
         Note over TS: Wait for more rooms to complete
     end
 
     Note over SP: Bracket projection updates
-    K->>SP: PlayerAdvanced, PlayerEliminated,<br/>TournamentRoundCreated
-    SP->>SP: Update tournament bracket projection
+    K->>SP: PlayerAdvanced, PlayerEliminated,<br/>TournamentRoundCreated (or TournamentCompleted)
+    SP->>SP: Update tournament bracket projection<br/>(all-forfeit rooms show all eliminated)
     SP->>SP: Push to bracket SSE subscribers
 ```
 

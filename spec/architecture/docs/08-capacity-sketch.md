@@ -18,7 +18,8 @@
 | Games per match (best-of-3) | 2.5 average | Early termination at 2 wins (2-player) or always 3 (multi-player) |
 | Match duration | ~25 minutes | ~10 min × 2.5 games |
 | Commands per player per game | ~60 | PlayCard, DrawCard, PassTurn, CallUno, challenges |
-| Events per game (all types) | ~150 | State-change events including turns, draws, plays, challenges |
+| Events per command (average) | ~3 | Every accepted command emits at least one primary event plus typically a `TurnAdvanced`/`TurnPassed`/`TurnSkipped`; challenge plays additionally emit window-open / resolved / penalty events. See the event catalog in `03-bounded-contexts/room-gameplay.md`. |
+| Events per game (all types) | ~1,800 | 600 commands × 3 events/command (revised from the prior ~150 figure, which understated the event:command ratio implied by the catalog) |
 | Event payload size | ~1 KB average | JSON with game state delta |
 
 ---
@@ -46,15 +47,22 @@
 | game-engine instances | 200 | Horizontal scaling |
 | Commands per instance | **~500 cmd/s** | 100k / 200 |
 
-Each `game-engine` instance handles ~500 commands/sec. PostgreSQL write per command: 2 inserts (event store + outbox) = ~1,000 writes/sec per instance. Aggregate across all 200 instances: ~100k writes/s flowing to the single RG PostgreSQL primary. This is at the high end of what cloud PostgreSQL can sustain; the single-primary design is a known bottleneck at this scale. See §8.6 for the concrete mitigation path (horizontal write sharding by `gameId` range).
+Each `game-engine` instance handles ~500 commands/sec. PostgreSQL write per command: 2 inserts (event store + outbox) = ~1,000 writes/sec per instance. Aggregate across all 200 instances: ~100k writes/s **distributed across 4 RG PostgreSQL shards** (each shard owning a contiguous `gameId` range) → ~25k writes/s per shard primary, well within cloud PostgreSQL provisioned-IOPS limits (~50k writes/s sustained per shard with fsync; gp3 / io2 32k+ IOPS). Sharding by `gameId` is the **deployed topology for the 1M-player tournament profile**, not a future option: §8.6, `02-container-view.md` §2.1 (RG PostgreSQL: "3–N primary shards"), and `07-persistence.md` §7.3 all describe the same N-shard configuration. The ≤50k-game single-shard mode from §8.6 is the *casual-only* deployment profile for smaller installations; tournament deployments come up with 4+ shards from day one.
+
+**In-memory aggregate cache — memory budget and warm-up cost:**
+
+- **Memory budget per instance:** 500 games × ~1,800 events (peak, end-of-game) × ~1 KB event payload = ~900 MB of raw event history. After materialization into the live Game aggregate (hands, deck state, current player, etc.), the working in-memory size is smaller — typically ~200–300 KB per game (compressed aggregate state) → **~100–150 MB per instance** for 500 active games. This is well within a typical 4–8 GB instance allocation alongside application code, JVM/GC overhead, and connection pools.
+- **Eviction:** Completed games (GameCompleted received) are evicted from the cache immediately. Active games older than a configurable idle threshold (default: game turn timer + 30 s buffer) are also eligible for eviction; re-access triggers a rebuild from `game_events`.
+- **Warm-up on rolling restart:** When a `game-engine` instance restarts, it must rebuild aggregates for all games in its `gameId` shard range. At 500 games × ~900 events average × 1 KB = ~450 MB of event data per instance, read from the shard's PostgreSQL primary. At 100 MB/s sequential read throughput (cloud storage), warm-up takes ~4.5 s per instance. During warm-up, commands for games not yet loaded fall back to the event-store replay path (adds ~10–30 ms per command). Rolling restarts (one instance at a time) keep aggregate command throughput above 95% during this brief window.
+- **Read load during warm-up:** 450 MB per instance read from the shard primary on restart. With 200 instances and a 30-instance rolling-restart window (15% rolling batch), this adds ~30 instances × ~100 MB/s = ~3 GB/s read burst to the shard primaries for ~4.5 s. This is a recognized warm-up read spike that operators should schedule during off-peak hours or use read replicas for.
 
 ### 8.2.3 Event Production Rate (game-engine → Kafka)
 
 | Metric | Value | Derivation |
 |--------|-------|------------|
-| Events per game per second | ~0.25 | 150 events / 600 s |
-| **gameplay.events throughput** | **~25,000 events/s** | 100k games × 0.25 events/s |
-| Payload throughput | **~25 MB/s** | 25k events × 1 KB |
+| Events per game per second | ~3.0 | 1,800 events / 600 s (600 commands × 3 events/command, per §8.1 revision) |
+| **gameplay.events throughput** | **~300,000 events/s** | 100k games × 3.0 events/s |
+| Payload throughput | **~300 MB/s** | 300k events × 1 KB |
 | Outbox relay latency | 50 ms (polling interval) | Adds ≤ 50 ms to event delivery |
 
 ### 8.2.4 Kafka Consumer Read Multiplier
@@ -63,13 +71,13 @@ Each consumer group reads the full topic independently:
 
 | Topic | Producers | Consumer Groups | Write Rate | Total Read Rate |
 |-------|-----------|----------------|------------|-----------------|
-| `gameplay.events` | game-engine | spectator-projection, ranking, tournament, audit | 25k events/s | 100k events/s (4× fan-out) |
+| `gameplay.events` | game-engine | spectator-projection, ranking, tournament, audit | 300k events/s | 1,200k events/s (4× fan-out) |
 | `gameplay.games` | game-engine | room-service, ranking, spectator-projection, audit | ~83 events/s (steady) | ~332 events/s |
 | `gameplay.rooms` | room-service | tournament, spectator-projection, audit | ~500 events/s | ~1.5k events/s |
 | `tournament.lifecycle` | tournament-service | spectator-projection, ranking, audit | ~100 events/s (burst) | ~300 events/s |
 | `tournament.rooms` | round-kickoff-worker | room-service | 10k events/s (burst, 10 s) | 10k events/s |
 
-**Peak Kafka throughput:** ~25 MB/s write + ~100 MB/s read. Standard Kafka cluster (3–5 brokers) handles this comfortably.
+**Peak Kafka throughput:** ~300 MB/s write + ~1,200 MB/s read on `gameplay.events`. Requires a high-throughput Kafka cluster (5+ brokers, ≥256 partitions on `gameplay.events`) to distribute the 4-consumer-group read load at this throughput; remaining topics are negligible by comparison.
 
 ### 8.2.5 Database Load Per Context
 
@@ -77,11 +85,11 @@ Each consumer group reads the full topic independently:
 |---------|-----------|------|-------|
 | **RG — Event store** | INSERT game_events + outbox | ~100k writes/s (50k events + 50k outbox) | Distributed across 200 game-engine instances. ~500 writes/s per instance per DB connection. Partitioned by gameId. |
 | **RG — Room state** | UPDATE rooms, matches | ~500/s | Low frequency. State transitions are infrequent per room. |
-| **RG — Timer deadlines** | INSERT + UPDATE (poll+fire) | ~10k/s | Turn timers: 100k active. ~1 fire/s per game average. |
+| **RG — Timer deadlines** | INSERT + UPDATE (poll+fire) + SELECT (poll reads) | ~10k writes/s (fires) + ~100 SELECT queries/s (10 instances × 10 polls/s) | Turn timers: 100k active, ~1 fire/s per game average. Poll SELECTs are index range scans on `(shard_id, fired, expiresAt)`; each poll returns 0–50 expired rows in steady state. Outbox relay adds ~4k SELECT/s on the same primary (disjoint table). Combined ~4.1k read queries/s adds modest overhead to the write-heavy primary — both workloads use short-lived index scans, not full-table reads. |
 | **TO — Completion counter** | Atomic UPDATE + INSERT | ~83/s (steady), burst ~5k/s (round end) | SERIALIZABLE per round. Idempotent via unique constraint. |
 | **RK — Elo updates** | UPDATE + INSERT (per player) | Burst: ~8k/s at round end (100k games × 10 players / ~120 s) | Per-player atomic TX. Consumer group scales with partitions. |
 | **SV — Projection updates** | UPSERT spectator projections | ~25k/s (matches gameplay.events rate) | Document updates. Can batch. |
-| **AL — Audit ingestion** | INSERT (append-only) | ~30k/s (all events) | Append-only. Batch inserts. ClickHouse native batch support. |
+| **AL — Audit ingestion** | INSERT (append-only) | ~300k/s (`gameplay.events` dominates; other topics add ~1k/s) | Append-only. Batch inserts. ClickHouse native batch support. |
 | **IS — Sessions** | Mostly reads (token validation cache in Redis) | ~1M reads/s (Redis), ~100 writes/s (logins) | Redis handles read volume. PostgreSQL only on cache miss. |
 
 ### 8.2.6 Timer Service Load
@@ -92,10 +100,12 @@ Each consumer group reads the full topic independently:
 | Active reconnection timers | ~1,000 (worst case) | ~1% of players disconnected at any time |
 | Active challenge windows | ~500 | ~0.5% of games in challenge phase |
 | **Total active timers** | **~101,500** | Sum |
-| Timer-service instances | 10 | Sharded by deadline time bucket |
-| Timers per instance | ~10,000 | Evenly distributed |
+| Timer-service instances | 10 | Sharded by `gameId % 10` (shard column written at INSERT time by `game-engine`) |
+| Timers per instance | ~10,000 | Evenly distributed by `gameId` hash |
 | Poll frequency | Every 100 ms per instance | |
 | Timer fire rate (steady state) | ~1,700/s | Turn timers: ~1/game/10s = ~10k/10 = ~1k. Challenge windows: 500 fires/5s = 100/s. Reconnection: rare. |
+
+**Deadline-bucket sharding scheme:** Each `timer_deadlines` row carries a `shard_id = gameId % 10` column (written by `game-engine` at INSERT time). Timer-service instance `i` polls only `WHERE shard_id = i AND expiresAt <= now() AND fired = false ORDER BY expiresAt LIMIT 1000`. A composite index on `(shard_id, fired, expiresAt)` makes each poll an efficient range scan of ≤ 10k rows returning 0–50 expired entries in steady state. This eliminates cross-instance contention; `SKIP LOCKED` is a safety net for transient overlap during rolling restarts, not the primary concurrency mechanism. The shard scheme aligns with the RG DB shard-by-`gameId` layout (§8.2.2): each timer-service instance naturally co-locates with the game-engine instances on the same `gameId` range shard, keeping poll queries on the local shard primary and avoiding cross-shard reads.
 
 ---
 
@@ -170,18 +180,18 @@ Games within a round don't finish simultaneously — game durations vary (~5–2
 |--------|-------|
 | Concurrent spectated games (assuming 20% of 100k rooms have spectators) | ~20,000 games |
 | Average spectators per watched game | ~250 (5M total / 20k games) |
-| Events per game per second | ~0.25 |
-| Spectator events per second (total) | ~5,000 |
-| SSE pushes per second (total) | ~1,250,000 (5k events × 250 spectators) |
-| Per gateway instance (600 instances) | ~2,000 SSE pushes/s |
+| Events per game per second | ~3.0 |
+| Spectator events per second (total) | ~60,000 |
+| SSE pushes per second (total) | ~15,000,000 (60k events × 250 spectators) |
+| Per gateway instance (600 instances) | ~25,000 SSE pushes/s |
 
 ### Popular Rooms (Tournament Finals)
 
 | Metric | Value |
 |--------|-------|
 | Spectators on final room | 100,000+ |
-| Events per second | ~0.25 |
-| SSE pushes per second | ~25,000 |
+| Events per second | ~3.0 |
+| SSE pushes per second | ~300,000 |
 
 **Mitigation for popular rooms:**
 - **Regional edge proxies** (declared deployable in `02-container-view.md` §2.3 and integration-table S13) subscribe to 1 upstream SSE and fan out to local spectators.
@@ -206,7 +216,7 @@ Games within a round don't finish simultaneously — game durations vary (~5–2
 | `spectator-projection-service` | 30 | Event consumption + projection writes (25k/s) | Consumer group partitions + read replicas | None |
 | `audit-service` | 10 | Append-only ingestion (~30k/s) | Consumer group partitions, batch inserts | None |
 | **Kafka** | 5 brokers | 25 MB/s write, 100 MB/s read | Add brokers, increase partitions | None (clustered) |
-| **PostgreSQL (RG)** | 3–N (primary shard(s) + 2 replicas each) | 100k writes/s | Horizontal write sharding by `gameId` range (each shard owns a contiguous `gameId` range; `game-engine` instances route writes to their shard's primary). At 1M-player scale, 4 shards × ~25k writes/s each is well within cloud PostgreSQL limits (provisioned IOPS io2, 32k IOPS per shard). Single-shard primary is sufficient for ≤ 50k games (i.e., roughly the first tournament round); sharding is activated before scaling beyond that. | Write sharding is the concrete path to scale; partition affinity at the service layer (each `game-engine` instance is pinned to a `gameId` range) makes routing deterministic without distributed transactions. |
+| **PostgreSQL (RG)** | 4 (primary shard + 2 replicas each) for the 1M-player tournament profile; ≥ 8 for the 2M total-player capacity from §8.7 | 100k writes/s | Horizontal write sharding by `gameId` range (each shard owns a contiguous `gameId` range; `game-engine` instances route writes to their shard's primary). At 1M-player tournament scale, 4 shards × ~25k writes/s each sits well within cloud PostgreSQL limits (provisioned IOPS io2, 32k IOPS per shard) and below the ~50k writes/s/shard fsync ceiling. The single-shard mode is reserved for **casual-only** deployments at ≤ 50k concurrent games. Tournament-capable deployments come up with 4+ shards from day one. | Write sharding is the deployed topology, not a future activation; partition affinity at the service layer (each `game-engine` instance is pinned to a `gameId` range) makes routing deterministic without distributed transactions. |
 | **Redis** | 3–6 (cluster) | 1M+ reads/s (session cache) | Cluster sharding | None (clustered) |
 
 ---
@@ -222,7 +232,7 @@ The "~2M total players" estimate is derived from the combination of simultaneous
 | Gateway connections | 6M (600 instances × 10k each) | 1M tournament players + 5M spectators = 6M peak. Remaining headroom supports 1M additional casual players (1M WS + ≈0 spectators for casual) within the same 6M connection budget. |
 | Redis session cache | 1M reads/s (cluster) | Each active session generates ~1 read/request. At 2M simultaneous active sessions (each issuing ~0.5 requests/s average), that is ~1M reads/s — at the cluster limit. |
 | RG PostgreSQL | 100k writes/s with single shard (2 shards → 200k writes/s) | 1M tournament games + an additional 100k casual games = ~110k total games, each at ~1 cmd/s = ~110k writes/s. Within 2-shard capacity. |
-| Kafka (gameplay.events) | 25k events/s sustained per producer group | 1.1M total games × 0.25 events/s = ~275k events/s requires ~11 parallel producer groups / 11× partition count. This is the binding constraint: expanding to 2M concurrent players requires scaling Kafka partitions from 128 to 256+. |
+| Kafka (gameplay.events) | 300k events/s at 1M-player tournament scale | ~110k concurrent games (100k tournament + ~10k casual) × 3.0 events/s = ~330k events/s. This is the binding constraint: expanding to 2M concurrent players requires scaling `gameplay.events` to ≥512 partitions and multi-cluster Kafka. |
 
 **Conclusion:** The "~2M total players" estimate reflects a realistic upper bound where 1M play in a tournament and 1M play in casual rooms simultaneously. The binding constraints are the Redis session cache (1M reads/s) and Kafka partition count. Scaling to 5M requires multi-region deployment.
 
@@ -231,7 +241,7 @@ The "~2M total players" estimate is derived from the combination of simultaneous
 | Total players | ~2M (1M tournament + 1M casual, per derivation above) | ~5M before multi-region needed | Geo-partitioned tournaments |
 | Concurrent games | ~200k | ~500k before Kafka/DB bottleneck | Increase Kafka partitions (128+), more game-engine instances |
 | Spectators | ~10M | ~20M before edge capacity limit | More regional edges, CDN-backed SSE |
-| Event throughput | ~50k events/s | ~100k events/s per Kafka cluster | Multi-cluster Kafka, tiered topics |
+| Event throughput | ~300k events/s | ~1.2M events/s read (4× fan-out) per Kafka cluster | Multi-cluster Kafka, tiered topics, ≥256 partitions on `gameplay.events` |
 | DB write throughput (RG) | ~100k writes/s (single shard, provisioned IOPS) | ~400k writes/s with 4-shard horizontal sharding | Add `gameId`-range shards; `game-engine` instances pin to their shard. Sharding is the concrete next step once a single primary approaches its WAL throughput ceiling (~50k writes/s sustained with fsync). |
 
 ---
@@ -242,10 +252,10 @@ The "~2M total players" estimate is derived from the combination of simultaneous
 |--------|-------|
 | Peak concurrent long-lived connections | ~6M (1M WS + 5M SSE) |
 | Peak aggregate command rate | ~100,000 cmd/s |
-| Peak event production (gameplay.events) | ~25,000 events/s |
-| Peak Kafka throughput | ~25 MB/s write, ~100 MB/s read |
+| Peak event production (gameplay.events) | ~300,000 events/s |
+| Peak Kafka throughput | ~300 MB/s write, ~1,200 MB/s read |
 | First-round surge room creation | ~10,000 rooms/s for ~10 s |
-| Peak SSE fan-out | ~1,250,000 pushes/s |
+| Peak SSE fan-out | ~15,000,000 pushes/s (average case); ~300,000 pushes/s for finals room alone |
 | Total gateway instances | ~600 |
 | Total game-engine instances | ~200 |
 | Total service instances (all) | ~950 |
